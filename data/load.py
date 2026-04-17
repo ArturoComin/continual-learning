@@ -1,9 +1,23 @@
 import copy
+from functools import partial
+
 import numpy as np
 from torchvision import transforms
 from torch.utils.data import ConcatDataset
 from data.manipulate import permutate_image_pixels, SubDataset, TransformedDataset
 from data.available import AVAILABLE_DATASETS, AVAILABLE_TRANSFORMS, DATASET_CONFIGS
+
+
+def _map_label_through_perm(y, perm):
+    return int(perm[y])
+
+
+def _subtract_label_base(y, base):
+    return y - base
+
+
+def _add_task_class_offset(y, context_id, classes_per_context):
+    return y + context_id * classes_per_context
 
 
 def get_dataset(name, type='train', download=True, capacity=None, permutation=None, dir='./store/datasets',
@@ -19,7 +33,9 @@ def get_dataset(name, type='train', download=True, capacity=None, permutation=No
     if normalize:
         transforms_list += [*AVAILABLE_TRANSFORMS[name+"_norm"]]
     if permutation is not None:
-        transforms_list.append(transforms.Lambda(lambda x, p=permutation: permutate_image_pixels(x, p)))
+        transforms_list.append(
+            transforms.Lambda(partial(permutate_image_pixels, permutation=permutation))
+        )
     dataset_transform = transforms.Compose(transforms_list)
 
     # load data-set
@@ -109,22 +125,27 @@ def get_context_set(name, scenario, contexts, data_dir="./datasets", only_config
         train_datasets = []
         test_datasets = []
         for context_id, perm in enumerate(permutations):
-            target_transform = transforms.Lambda(
-                lambda y, x=context_id: y + x*classes_per_context
-            ) if scenario in ('task', 'class') and not (scenario=='task' and singlehead) else None
+            target_transform = (
+                transforms.Lambda(partial(
+                    _add_task_class_offset,
+                    context_id=context_id,
+                    classes_per_context=classes_per_context,
+                ))
+                if scenario in ('task', 'class') and not (scenario == 'task' and singlehead)
+                else None
+            )
+            permute_tf = transforms.Lambda(partial(permutate_image_pixels, permutation=perm))
             train_datasets.append(TransformedDataset(
-                trainset, transform=transforms.Lambda(lambda x, p=perm: permutate_image_pixels(x, p)),
-                target_transform=target_transform
+                trainset, transform=permute_tf, target_transform=target_transform
             ))
             test_datasets.append(TransformedDataset(
-                testset, transform=transforms.Lambda(lambda x, p=perm: permutate_image_pixels(x, p)),
-                target_transform=target_transform
+                testset, transform=permute_tf, target_transform=target_transform
             ))
     else:
         # prepare permutation to shuffle label-ids (to create different class batches for each random seed)
         classes = config['classes']
         perm_class_list = np.array(list(range(classes))) if exception else np.random.permutation(list(range(classes)))
-        target_transform = transforms.Lambda(lambda y, p=perm_class_list: int(p[y]))
+        target_transform = transforms.Lambda(partial(_map_label_through_perm, perm=perm_class_list))
         # prepare train and test datasets with all classes
         trainset = get_dataset(data_type, type="train", dir=data_dir, target_transform=target_transform,
                                verbose=verbose, augment=augment, normalize=normalize)
@@ -140,15 +161,19 @@ def get_context_set(name, scenario, contexts, data_dir="./datasets", only_config
         # split the train and test datasets up into sub-datasets
         train_datasets = []
         for labels in labels_per_dataset_train:
-            target_transform = transforms.Lambda(lambda y, x=labels[0]: y-x) if (
-                    scenario=='domain' or (scenario=='task' and singlehead)
-            ) else None
+            target_transform = (
+                transforms.Lambda(partial(_subtract_label_base, base=labels[0]))
+                if (scenario == 'domain' or (scenario == 'task' and singlehead))
+                else None
+            )
             train_datasets.append(SubDataset(trainset, labels, target_transform=target_transform))
         test_datasets = []
         for labels in labels_per_dataset_test:
-            target_transform = transforms.Lambda(lambda y, x=labels[0]: y-x) if (
-                    scenario=='domain' or (scenario=='task' and singlehead)
-            ) else None
+            target_transform = (
+                transforms.Lambda(partial(_subtract_label_base, base=labels[0]))
+                if (scenario == 'domain' or (scenario == 'task' and singlehead))
+                else None
+            )
             test_datasets.append(SubDataset(testset, labels, target_transform=target_transform))
 
     # Return tuple of train- and test-dataset, config-dictionary and number of classes per context
