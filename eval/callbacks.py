@@ -1,3 +1,4 @@
+import numpy as np
 from eval import evaluate
 
 
@@ -32,7 +33,7 @@ def _sample_cb(log, config, visdom=None, test_datasets=None, sample_size=64):
 
 
 def _eval_cb(log, test_datasets, visdom=None, plotting_dict=None, iters_per_context=None, test_size=None,
-             summary_graph=True, S='mean'):
+             summary_graph=True, S='mean', drift_tracker=None):
     '''Initiates function for evaluating performance of classifier (in terms of accuracy).
 
     [test_datasets]       <list> of <Datasets>; also if only 1 context, it should be presented as a list!
@@ -53,6 +54,41 @@ def _eval_cb(log, test_datasets, visdom=None, plotting_dict=None, iters_per_cont
             # Evaluate the classifier on multiple contexts (and log to visdom)
             evaluate.test_all_so_far(classifier, test_datasets, context, iteration, test_size=test_size,
                                      visdom=visdom, summary_graph=summary_graph, plotting_dict=plotting_dict)
+
+            if drift_tracker is not None:
+                current_context = context
+                if current_context is None:
+                    current_context = int(np.ceil(float(iteration) / float(iters_per_context)))
+                    current_context = min(max(current_context, 1), len(test_datasets))
+                reference_context = drift_tracker["reference_context"]
+                if plotting_dict is not None:
+                    snapshots = plotting_dict.get("drift", {}).get("snapshots", {})
+                    if str(current_context) not in snapshots:
+                        evaluate.append_drift_snapshot(
+                            plotting_dict, current_context, evaluate.get_drift_state_serializable(
+                                classifier, test_datasets, repr_samples=drift_tracker["repr_samples"]
+                            )
+                        )
+                if drift_tracker["reference_state"] is None and current_context >= reference_context:
+                    drift_tracker["reference_state"] = evaluate.get_drift_reference_state(
+                        classifier, test_datasets, reference_context=reference_context, repr_samples=drift_tracker["repr_samples"]
+                    )
+                if drift_tracker["reference_state"] is not None:
+                    drift_metrics = evaluate.compute_drift_metrics(
+                        classifier, test_datasets, drift_tracker["reference_state"],
+                        current_context=current_context, repr_samples=drift_tracker["repr_samples"]
+                    )
+                    evaluate.append_drift_to_plotting_dict(
+                        plotting_dict, drift_metrics, iteration=iteration, current_context=current_context
+                    )
+                    if visdom is not None:
+                        from visual import visual_visdom
+                        visual_visdom.visualize_scalars(
+                            [drift_metrics["param_cos_similarity"], drift_metrics["representational_cos_similarity"]],
+                            names=["param_cos_similarity", "representational_cos_similarity"],
+                            title="drift ({})".format(visdom["graph"]), iteration=iteration, env=visdom["env"],
+                            ylabel="cosine similarity"
+                        )
 
     ## Return the callback-function (except if visdom is not selected!)
     return eval_cb if (visdom is not None) or (plotting_dict is not None) else None

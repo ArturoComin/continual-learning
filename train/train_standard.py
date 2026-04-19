@@ -1,7 +1,7 @@
 import tqdm
 
 
-def train(model, train_loader, iters, loss_cbs=list(), eval_cbs=list()):
+def train(model, train_loader, iters, loss_cbs=list(), eval_cbs=list(), non_blocking=False):
     '''Train a model with a "train_a_batch" method for [iters] iterations on data from [train_loader].
 
     [model]             model to optimize
@@ -24,7 +24,8 @@ def train(model, train_loader, iters, loss_cbs=list(), eval_cbs=list()):
             iteration += 1
 
             # Perform training-step on this batch
-            data, y = data.to(device), y.to(device)
+            data = data.to(device, non_blocking=non_blocking)
+            y = y.to(device, non_blocking=non_blocking)
             loss_dict = model.train_a_batch(data, y=y)
 
             # Fire training-callbacks (for visualization of training-progress)

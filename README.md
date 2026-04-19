@@ -28,11 +28,18 @@ with the following versions of PyTorch and Torchvision:
 * `pytorch 1.11.0`
 * `torchvision 0.12.0`
 
-Further Python-packages used are listed in `requirements.txt`.
+Further Python-packages used are listed in `requirements.txt` (with conservative version ranges).
 Assuming Python and pip are set up, these packages can be installed using:
 ```bash
 pip install -r requirements.txt
 ```
+
+For reproducibility and faster data input on multi-core systems, the training scripts now support:
+- `--num-workers` (DataLoader workers)
+- `--persistent-workers` (when `--num-workers > 0`)
+- `--prefetch-factor` (when `--num-workers > 0`)
+- `--pin-memory` / `--no-pin-memory`
+- `--non-blocking` (host-to-device transfers)
 
 The code in this repository itself does not need to be installed, but a number of scripts should be made executable:
 ```bash
@@ -105,6 +112,11 @@ For information on further options: `./main.py -h`.
 The code supports combinations of several of the above methods.
 It is also possible to create custom approaches by mixing components of different methods,
 although not all possible combinations have been tested.
+
+To run a short smoke test (recommended before long runs), use reduced iterations and contexts, for example:
+```bash
+./main.py --experiment=splitMNIST --scenario=task --contexts=2 --iters=50 --batch=64 --num-workers=2 --non-blocking
+```
 
 #### More flexible, "task-free" continual learning experiments
 Custom individual experiments in a more flexible, "task-free" continual learning setting can be run with 

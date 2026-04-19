@@ -10,6 +10,16 @@ from data.manipulate import SubDataset, MemorySetDataset
 from models.cl.continual_learner import ContinualLearner
 
 
+def _refresh_replay_model(model, previous_model=None):
+    """Reuse an existing replay model by refreshing weights in place."""
+    if previous_model is None:
+        previous_model = copy.deepcopy(model)
+    else:
+        previous_model.load_state_dict(model.state_dict())
+    previous_model.eval()
+    return previous_model
+
+
 def train_cl(model, train_datasets, iters=2000, batch_size=32, baseline='none',
              loss_cbs=list(), eval_cbs=list(), sample_cbs=list(), context_cbs=list(),
              generator=None, gen_iters=0, gen_loss_cbs=list(), **kwargs):
@@ -31,10 +41,13 @@ def train_cl(model, train_datasets, iters=2000, batch_size=32, baseline='none',
     # Use cuda?
     cuda = model._is_on_cuda()
     device = model._device()
+    loader_kwargs = getattr(model, 'data_loader_kwargs', {})
+    non_blocking = getattr(model, 'non_blocking', False)
 
     # Initiate possible sources for replay (no replay for 1st context)
     ReplayStoredData = ReplayGeneratedData = ReplayCurrentData = False
     previous_model = None
+    previous_generator = None
 
     # Register starting parameter values (needed for SI)
     if isinstance(model, ContinualLearner) and model.importance_weighting=='si':
@@ -130,7 +143,9 @@ def train_cl(model, train_datasets, iters=2000, batch_size=32, baseline='none',
             # Update # iters left on current data-loader(s) and, if needed, create new one(s)
             iters_left -= 1
             if iters_left==0:
-                data_loader = iter(get_data_loader(training_dataset, batch_size, cuda=cuda, drop_last=True))
+                data_loader = iter(
+                    get_data_loader(training_dataset, batch_size, cuda=cuda, drop_last=True, **loader_kwargs)
+                )
                 # NOTE:  [train_dataset]  is training-set of current context
                 #      [training_dataset] is training-set of current context with stored samples added (if requested)
                 iters_left = len(data_loader)
@@ -144,15 +159,18 @@ def train_cl(model, train_datasets, iters=2000, batch_size=32, baseline='none',
                         iters_left_previous[context_id] -= 1
                         if iters_left_previous[context_id]==0:
                             data_loader_previous[context_id] = iter(get_data_loader(
-                                previous_datasets[context_id], batch_size_to_use, cuda=cuda, drop_last=True
+                                previous_datasets[context_id], batch_size_to_use, cuda=cuda, drop_last=True,
+                                **loader_kwargs
                             ))
                             iters_left_previous[context_id] = len(data_loader_previous[context_id])
                 else:
                     iters_left_previous -= 1
                     if iters_left_previous==0:
                         batch_size_to_use = min(batch_size, len(ConcatDataset(previous_datasets)))
-                        data_loader_previous = iter(get_data_loader(ConcatDataset(previous_datasets),
-                                                                    batch_size_to_use, cuda=cuda, drop_last=True))
+                        data_loader_previous = iter(get_data_loader(
+                            ConcatDataset(previous_datasets), batch_size_to_use, cuda=cuda, drop_last=True,
+                            **loader_kwargs
+                        ))
                         iters_left_previous = len(data_loader_previous)
 
 
@@ -165,7 +183,8 @@ def train_cl(model, train_datasets, iters=2000, batch_size=32, baseline='none',
                 x, y = next(data_loader)                             #--> sample training data of current context
                 y = y-model.classes_per_context*(context-1) if per_context and not per_context_singlehead else y
                 # --> adjust the y-targets to the 'active range'
-                x, y = x.to(device), y.to(device)                    #--> transfer them to correct device
+                x = x.to(device, non_blocking=non_blocking)          #--> transfer them to correct device
+                y = y.to(device, non_blocking=non_blocking)
                 # If --bce & --bce-distill, calculate scores for past classes of current batch with previous model
                 binary_distillation = hasattr(model, "binaryCE") and model.binaryCE and model.binaryCE_distill
                 if binary_distillation and model.scenario in ("class", "all") and (previous_model is not None):
@@ -187,8 +206,8 @@ def train_cl(model, train_datasets, iters=2000, batch_size=32, baseline='none',
                 if not per_context:
                     # Sample replayed training data, move to correct device
                     x_, y_ = next(data_loader_previous)
-                    x_ = x_.to(device)
-                    y_ = y_.to(device) if (model.replay_targets=="hard") else None
+                    x_ = x_.to(device, non_blocking=non_blocking)
+                    y_ = y_.to(device, non_blocking=non_blocking) if (model.replay_targets=="hard") else None
                     # If required, get target scores (i.e, [scores_])         -- using previous model, with no_grad()
                     if (model.replay_targets=="soft"):
                         with torch.no_grad():
@@ -203,12 +222,12 @@ def train_cl(model, train_datasets, iters=2000, batch_size=32, baseline='none',
                     up_to_context = context if baseline=="cummulative" else context-1
                     for context_id in range(up_to_context):
                         x_temp, y_temp = next(data_loader_previous[context_id])
-                        x_.append(x_temp.to(device))
+                        x_.append(x_temp.to(device, non_blocking=non_blocking))
                         # -only keep [y_] if required (as otherwise unnecessary computations will be done)
                         if model.replay_targets=="hard":
                             if not per_context_singlehead:
                                 y_temp = y_temp - (model.classes_per_context*context_id) #-> adjust y to 'active range'
-                            y_.append(y_temp.to(device))
+                            y_.append(y_temp.to(device, non_blocking=non_blocking))
                         else:
                             y_.append(None)
                     # If required, get target scores (i.e, [scores_])        -- using previous model, with no_grad()
@@ -392,10 +411,20 @@ def train_cl(model, train_datasets, iters=2000, batch_size=32, baseline='none',
 
         # REPLAY: update source for replay
         if context<len(train_datasets) and hasattr(model, 'replay_mode'):
-            previous_model = copy.deepcopy(model).eval()
+            needs_previous_model = (
+                model.replay_mode in ('current', 'generative')
+                or model.replay_targets == "soft"
+                or (hasattr(model, "binaryCE") and model.binaryCE and model.binaryCE_distill)
+            )
+            if needs_previous_model:
+                previous_model = _refresh_replay_model(model, previous_model)
+
             if model.replay_mode == 'generative':
                 ReplayGeneratedData = True
-                previous_generator = copy.deepcopy(generator).eval() if generator is not None else previous_model
+                previous_generator = (
+                    _refresh_replay_model(generator, previous_generator)
+                    if generator is not None else previous_model
+                )
             elif model.replay_mode == 'current':
                 ReplayCurrentData = True
             elif model.replay_mode in ('buffer', 'all'):
@@ -439,6 +468,8 @@ def train_fromp(model, train_datasets, iters=2000, batch_size=32,
     # Use cuda?
     cuda = model._is_on_cuda()
     device = model._device()
+    loader_kwargs = getattr(model, 'data_loader_kwargs', {})
+    non_blocking = getattr(model, 'non_blocking', False)
 
     # Are there different active classes per context (or just potentially a different mask per context)?
     per_context = (model.scenario=="task" or (model.scenario=="class" and model.neg_samples=="current"))
@@ -496,14 +527,17 @@ def train_fromp(model, train_datasets, iters=2000, batch_size=32,
             # Update # iters left on current data-loader(s) and, if needed, create new one(s)
             iters_left -= 1
             if iters_left==0:
-                data_loader = iter(get_data_loader(train_dataset, batch_size, cuda=cuda, drop_last=True))
+                data_loader = iter(get_data_loader(
+                    train_dataset, batch_size, cuda=cuda, drop_last=True, **loader_kwargs
+                ))
                 iters_left = len(data_loader)
 
             # -----------------Collect data------------------#
             x, y = next(data_loader)           #--> sample training data of current context
             y = y - model.classes_per_context * (context - 1) if (per_context and not per_context_singlehead) else y
             # --> adjust the y-targets to the 'active range'
-            x, y = x.to(device), y.to(device)  # --> transfer them to correct device
+            x = x.to(device, non_blocking=non_blocking)  # --> transfer them to correct device
+            y = y.to(device, non_blocking=non_blocking)
 
             #---> Train MAIN MODEL
             if batch_index <= iters:
@@ -572,6 +606,8 @@ def train_gen_classifier(model, train_datasets, iters=2000, epochs=None, batch_s
     # Use cuda?
     device = model._device()
     cuda = model._is_on_cuda()
+    loader_kwargs = getattr(model, 'data_loader_kwargs', {})
+    non_blocking = getattr(model, 'non_blocking', False)
 
     # Loop over all contexts.
     classes_in_current_context = 0
@@ -582,7 +618,9 @@ def train_gen_classifier(model, train_datasets, iters=2000, epochs=None, batch_s
         iters_left = 1
 
         if epochs is not None:
-            data_loader = iter(get_data_loader(train_dataset, batch_size, cuda=cuda, drop_last=False))
+            data_loader = iter(get_data_loader(
+                train_dataset, batch_size, cuda=cuda, drop_last=False, **loader_kwargs
+            ))
             iters = len(data_loader)*epochs
 
         # Define a tqdm progress bar(s)
@@ -594,13 +632,16 @@ def train_gen_classifier(model, train_datasets, iters=2000, epochs=None, batch_s
             # Update # iters left on current data-loader(s) and, if needed, create new one(s)
             iters_left -= 1
             if iters_left==0:
-                data_loader = iter(get_data_loader(train_dataset, batch_size, cuda=cuda,
-                                                   drop_last=True if epochs is None else False))
+                data_loader = iter(get_data_loader(
+                    train_dataset, batch_size, cuda=cuda, drop_last=True if epochs is None else False,
+                    **loader_kwargs
+                ))
                 iters_left = len(data_loader)
 
             # Collect data
             x, y = next(data_loader)                                    #--> sample training data of current context
-            x, y = x.to(device), y.to(device)                           #--> transfer them to correct device
+            x = x.to(device, non_blocking=non_blocking)                 #--> transfer them to correct device
+            y = y.to(device, non_blocking=non_blocking)
             #y = y.expand(1) if len(y.size())==1 else y                 #--> hack for if batch-size is 1
 
             # Select model to be trained

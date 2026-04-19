@@ -76,7 +76,10 @@ def run(args, verbose=False):
     )
 
     # Specify "data-loader" (among others for easy random shuffling and 'batchifying')
-    train_loader = utils.get_data_loader(trainset, batch_size=args.batch, cuda=cuda, drop_last=True)
+    train_loader = utils.get_data_loader(
+        trainset, batch_size=args.batch, cuda=cuda, drop_last=True, num_workers=args.num_workers,
+        pin_memory=args.pin_memory, persistent_workers=args.persistent_workers, prefetch_factor=args.prefetch_factor,
+    )
 
     # Determine number of iterations:
     iters = args.iters if args.iters else args.epochs*len(train_loader)
@@ -139,7 +142,9 @@ def run(args, verbose=False):
     # (Pre)train model
     if verbose:
         print("\n\n " +' TRAINING '.center(70, '*'))
-    train_standard.train(cnn, train_loader, iters, loss_cbs=loss_cbs, eval_cbs=eval_cbs)
+    train_standard.train(
+        cnn, train_loader, iters, loss_cbs=loss_cbs, eval_cbs=eval_cbs, non_blocking=checkattr(args, 'non_blocking')
+    )
 
     # Save (pre)trained conv-layers and the full model
     if checkattr(args, 'save'):

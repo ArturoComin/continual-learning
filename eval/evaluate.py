@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import torch.nn.functional as F
 from visual import visual_plt
 from visual import visual_visdom
 from utils import get_data_loader,checkattr
@@ -136,7 +137,130 @@ def initiate_plotting_dict(n_contexts):
                                        #                                            Class-IL -> all classes so far
     plotting_dict["x_iteration"] = []  # total number of iterations so far
     plotting_dict["x_context"] = []    # number of contexts so far (i.e., context on which training just finished)
+    plotting_dict["drift"] = {
+        "param_cos_similarity": [],
+        "representational_cos_similarity": [],
+        "x_iteration": [],
+        "x_context": [],
+        "snapshots": {},
+    }
     return plotting_dict
+
+
+def _extract_model_for_context(model, context_id):
+    if model.label == "SeparateClassifiers":
+        return getattr(model, 'context{}'.format(context_id + 1))
+    return model
+
+
+def _get_parameter_vector(model):
+    parameter_list = [param.detach().view(-1).float().cpu() for param in model.parameters() if param.requires_grad]
+    if len(parameter_list) == 0:
+        parameter_list = [param.detach().view(-1).float().cpu() for param in model.parameters()]
+    return torch.cat(parameter_list, dim=0)
+
+
+def _compute_representation_vector(model, dataset, context_id, max_samples=256, batch_size=128):
+    eval_model = _extract_model_for_context(model, context_id)
+    device = eval_model.device if hasattr(eval_model, 'device') else eval_model._device()
+    cuda = eval_model.cuda if hasattr(eval_model, 'cuda') else eval_model._is_on_cuda()
+
+    mode = eval_model.training
+    eval_model.eval()
+
+    if hasattr(eval_model, "mask_dict") and eval_model.mask_dict is not None:
+        eval_model.apply_XdGmask(context=context_id + 1)
+
+    feature_batches = []
+    n_collected = 0
+    data_loader = get_data_loader(dataset, batch_size=batch_size, cuda=cuda)
+    for x, _ in data_loader:
+        if n_collected >= max_samples:
+            break
+        x = x.to(device)
+        with torch.no_grad():
+            if checkattr(eval_model, 'stream_classifier'):
+                context_tensor = torch.tensor([context_id] * x.shape[0]).to(device)
+                features = eval_model.feature_extractor(x, context=context_tensor)
+            else:
+                features = eval_model.feature_extractor(x)
+        features = features.view(features.shape[0], -1).float().cpu()
+        feature_batches.append(features)
+        n_collected += features.shape[0]
+
+    eval_model.train(mode=mode)
+
+    if len(feature_batches) == 0:
+        return None
+    all_features = torch.cat(feature_batches, dim=0)[:max_samples]
+    return all_features.mean(dim=0)
+
+
+def get_drift_reference_state(model, test_datasets, reference_context, repr_samples=256):
+    reference_state = {
+        "reference_context": reference_context,
+        "param_vector": _get_parameter_vector(model),
+        "repr_vectors": {},
+    }
+    for context_id, dataset in enumerate(test_datasets):
+        reference_state["repr_vectors"][context_id] = _compute_representation_vector(
+            model, dataset, context_id=context_id, max_samples=repr_samples
+        )
+    return reference_state
+
+
+def get_drift_state_serializable(model, test_datasets, repr_samples=256):
+    state = {
+        "param_vector": _get_parameter_vector(model).numpy().tolist(),
+        "repr_vectors": [],
+    }
+    for context_id, dataset in enumerate(test_datasets):
+        vector = _compute_representation_vector(model, dataset, context_id=context_id, max_samples=repr_samples)
+        state["repr_vectors"].append(None if vector is None else vector.numpy().tolist())
+    return state
+
+
+def compute_drift_metrics(model, test_datasets, reference_state, current_context, repr_samples=256):
+    current_param_vector = _get_parameter_vector(model)
+    param_cos_similarity = F.cosine_similarity(
+        current_param_vector.unsqueeze(0), reference_state["param_vector"].unsqueeze(0)
+    ).item()
+
+    max_context = len(test_datasets) if current_context is None else current_context
+    repr_cosines = []
+    for context_id in range(max_context):
+        ref_vector = reference_state["repr_vectors"].get(context_id)
+        if ref_vector is None:
+            continue
+        cur_vector = _compute_representation_vector(
+            model, test_datasets[context_id], context_id=context_id, max_samples=repr_samples
+        )
+        if cur_vector is None:
+            continue
+        repr_cosines.append(F.cosine_similarity(cur_vector.unsqueeze(0), ref_vector.unsqueeze(0)).item())
+
+    representational_cos_similarity = float(np.mean(repr_cosines)) if len(repr_cosines) > 0 else 0.0
+    return {
+        "param_cos_similarity": param_cos_similarity,
+        "representational_cos_similarity": representational_cos_similarity,
+    }
+
+
+def append_drift_to_plotting_dict(plotting_dict, drift_metrics, iteration, current_context):
+    if (plotting_dict is None) or ("drift" not in plotting_dict):
+        return
+    plotting_dict["drift"]["param_cos_similarity"].append(drift_metrics["param_cos_similarity"])
+    plotting_dict["drift"]["representational_cos_similarity"].append(drift_metrics["representational_cos_similarity"])
+    plotting_dict["drift"]["x_iteration"].append(iteration)
+    plotting_dict["drift"]["x_context"].append(current_context)
+
+
+def append_drift_snapshot(plotting_dict, current_context, snapshot):
+    if (plotting_dict is None) or ("drift" not in plotting_dict):
+        return
+    key = str(current_context)
+    if key not in plotting_dict["drift"]["snapshots"]:
+        plotting_dict["drift"]["snapshots"][key] = snapshot
 
 
 ####--------------------------------------------------------------------------------------------------------------####

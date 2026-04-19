@@ -5,6 +5,16 @@ from utils import checkattr
 from models.cl.continual_learner import ContinualLearner
 
 
+def _refresh_replay_model(model, previous_model=None):
+    """Reuse an existing replay model by refreshing weights in place."""
+    if previous_model is None:
+        previous_model = copy.deepcopy(model)
+    else:
+        previous_model.load_state_dict(model.state_dict())
+    previous_model.eval()
+    return previous_model
+
+
 def train_on_stream(model, datastream, iters=2000, loss_cbs=list(), eval_cbs=list()):
     '''Incrementally train a model on a ('task-free') stream of data.
     Args:
@@ -13,6 +23,7 @@ def train_on_stream(model, datastream, iters=2000, loss_cbs=list(), eval_cbs=lis
         iters (int, optional): max number of iterations, could be smaller if `datastream` runs out (default: ``2000``)
         *_cbs (list of callback-functions, optional): for evaluating training-progress (defaults: empty lists)
     '''
+    non_blocking = getattr(model, 'non_blocking', False)
 
     # Define tqdm progress bar(s)
     progress = tqdm.tqdm(range(1, iters + 1))
@@ -36,10 +47,10 @@ def train_on_stream(model, datastream, iters=2000, loss_cbs=list(), eval_cbs=lis
                 start_new_W = False
 
         # Move data to correct device
-        x = x.to(model._device())
-        y = y.to(model._device())
+        x = x.to(model._device(), non_blocking=non_blocking)
+        y = y.to(model._device(), non_blocking=non_blocking)
         if c is not None:
-            c = c.to(model._device())
+            c = c.to(model._device(), non_blocking=non_blocking)
 
         # If using separate networks, the y-targets need to be adjusted
         if model.label == "SeparateClassifiers":
@@ -58,7 +69,7 @@ def train_on_stream(model, datastream, iters=2000, loss_cbs=list(), eval_cbs=lis
             # ... using the data from the current batch (as in LwF)
             x_ = x
             if c is not None:
-                c_ = previous_model.sample_contexts(x_.shape[0]).to(model._device())
+                c_ = previous_model.sample_contexts(x_.shape[0]).to(model._device(), non_blocking=non_blocking)
             with torch.no_grad():
                 scores_ = previous_model.classify(x, c_, no_prototypes=True)
                 _, y_ = torch.max(scores_, dim=1)
@@ -96,7 +107,7 @@ def train_on_stream(model, datastream, iters=2000, loss_cbs=list(), eval_cbs=lis
         ##--> Replay: update source for replay
         if hasattr(model, 'replay_mode') and (not model.replay_mode=="none"):
             if (batch_id % model.update_every)==0:
-                previous_model = copy.deepcopy(model).eval()
+                previous_model = _refresh_replay_model(model, previous_model)
 
     # Close progres-bar(s)
     progress.close()
@@ -111,6 +122,7 @@ def train_gen_classifier_on_stream(model, datastream, iters=2000, loss_cbs=list(
         iters (int, optional): max number of iterations, could be smaller if `datastream` runs out (default: ``2000``)
         *_cbs (list of callback-functions, optional): for evaluating training-progress (defaults: empty lists)
     '''
+    non_blocking = getattr(model, 'non_blocking', False)
 
     # Define tqdm progress bar(s)
     progress = tqdm.tqdm(range(1, iters + 1))
@@ -121,8 +133,8 @@ def train_gen_classifier_on_stream(model, datastream, iters=2000, loss_cbs=list(
             break
 
         # Move data to correct device
-        x = x.to(model._device())
-        y = y.to(model._device())
+        x = x.to(model._device(), non_blocking=non_blocking)
+        y = y.to(model._device(), non_blocking=non_blocking)
 
         # Cycle through all classes. For each class present, take training step on corresponding generative model
         for class_id in range(model.classes):

@@ -160,6 +160,26 @@ def set_default_values(args, also_hyper_params=True, single_context=False, no_bo
 
 
 def check_for_errors(args, pretrain=False, **kwargs):
+    if hasattr(args, 'persistent_workers') and args.persistent_workers and hasattr(args, 'num_workers') and \
+            args.num_workers == 0:
+        raise ValueError("'--persistent-workers' requires '--num-workers' to be larger than 0.")
+    if hasattr(args, 'prefetch_factor') and args.prefetch_factor is not None:
+        if hasattr(args, 'num_workers') and args.num_workers == 0:
+            raise ValueError("'--prefetch-factor' requires '--num-workers' to be larger than 0.")
+        if args.prefetch_factor < 1:
+            raise ValueError("'--prefetch-factor' should be a positive integer.")
+    if hasattr(args, 'drift_repr_samples') and args.drift_repr_samples is not None and args.drift_repr_samples < 1:
+        raise ValueError("'--drift-repr-samples' should be a positive integer.")
+    if hasattr(args, 'drift_ref_context') and args.drift_ref_context is not None:
+        if (not hasattr(args, 'drift_metrics')) or (not args.drift_metrics):
+            raise ValueError("'--drift-ref-context' requires '--drift-metrics'.")
+        if hasattr(args, 'contexts') and args.contexts is not None:
+            if args.drift_ref_context < 1 or args.drift_ref_context > args.contexts:
+                raise ValueError("'--drift-ref-context' should be in [1, --contexts].")
+    if hasattr(args, 'drift_metrics') and args.drift_metrics:
+        if (not hasattr(args, 'drift_ref_context')) or args.drift_ref_context is None:
+            raise ValueError("'--drift-metrics' requires '--drift-ref-context'.")
+
     if pretrain:
         if checkattr(args, 'augment') and not args.experiment in ('CIFAR10', 'CIFAR100'):
             raise ValueError("Augmentation is only supported for 'CIFAR10' or 'CIFAR-100'.")

@@ -42,6 +42,14 @@ def handle_inputs():
 
 
 def run(args, verbose=False):
+    data_loader_kwargs = {
+        'num_workers': args.num_workers,
+        'pin_memory': args.pin_memory,
+        'persistent_workers': args.persistent_workers,
+        'prefetch_factor': args.prefetch_factor,
+    }
+    non_blocking = checkattr(args, 'non_blocking')
+
 
     # Create plots- and results-directories if needed
     if not os.path.isdir(args.r_dir):
@@ -180,6 +188,8 @@ def run(args, verbose=False):
     model.classes_per_context = config['classes_per_context']
     model.singlehead = checkattr(args, 'singlehead')
     model.neg_samples = args.neg_samples if hasattr(args, 'neg_samples') else "all"
+    model.data_loader_kwargs = data_loader_kwargs
+    model.non_blocking = non_blocking
 
     # Print some model-characteristics on the screen
     if verbose:
@@ -356,6 +366,15 @@ def run(args, verbose=False):
     plotting_dict = evaluate.initiate_plotting_dict(args.contexts) if (
             checkattr(args, 'pdf') or checkattr(args, 'results_dict')
     ) else None
+    drift_tracker = None
+    if checkattr(args, 'drift_metrics'):
+        if plotting_dict is None:
+            plotting_dict = evaluate.initiate_plotting_dict(args.contexts)
+        drift_tracker = {
+            "reference_context": args.drift_ref_context,
+            "repr_samples": args.drift_repr_samples,
+            "reference_state": None,
+        }
 
     # Setting up Visdom environment
     if utils.checkattr(args, 'visdom'):
@@ -392,13 +411,14 @@ def run(args, verbose=False):
     # -after each [acc_log], for visdom
     eval_cbs = [
         cb._eval_cb(log=args.acc_log, test_datasets=test_datasets, visdom=visdom, iters_per_context=args.iters,
-                    test_size=args.acc_n)
+                    test_size=args.acc_n, drift_tracker=drift_tracker)
     ] if (not checkattr(args, 'prototypes')) and (not checkattr(args, 'gen_classifier')) else [None]
     # -after each context, for plotting in pdf (when using prototypes / generative classifier, this is also for visdom)
     context_cbs = [
         cb._eval_cb(log=args.iters, test_datasets=test_datasets, plotting_dict=plotting_dict,
                     visdom=visdom if checkattr(args, 'prototypes') or checkattr(args, 'gen_classifier') else None,
-                    iters_per_context=args.iters, test_size=args.acc_n, S=args.eval_s if hasattr(args, 'eval_s') else 1)
+                    iters_per_context=args.iters, test_size=args.acc_n, S=args.eval_s if hasattr(args, 'eval_s') else 1,
+                    drift_tracker=drift_tracker)
     ]
 
     #-------------------------------------------------------------------------------------------------#
@@ -529,6 +549,14 @@ def run(args, verbose=False):
             line_names=['average all contexts so far']
         )
         figure_list.append(figure)
+        if checkattr(args, 'drift_metrics') and len(plotting_dict["drift"]["x_context"]) > 0:
+            figure = visual_plt.plot_lines(
+                [plotting_dict["drift"]["param_cos_similarity"],
+                 plotting_dict["drift"]["representational_cos_similarity"]],
+                x_axes=plotting_dict["drift"]["x_context"],
+                line_names=['param_cos_similarity', 'representational_cos_similarity']
+            )
+            figure_list.append(figure)
         # -add figures to pdf
         for figure in figure_list:
             pp.savefig(figure)

@@ -18,6 +18,7 @@ from params import options
 from params.param_stamp import get_param_stamp, get_param_stamp_from_args, visdom_name
 from params.param_values import set_method_options,check_for_errors,set_default_values
 from eval import evaluate, callbacks as cb
+from visual import visual_plt
 
 
 ## Function for specifying input-options and organizing / checking them
@@ -43,6 +44,14 @@ def handle_inputs():
 
 
 def run(args, verbose=False):
+    data_loader_kwargs = {
+        'num_workers': args.num_workers,
+        'pin_memory': args.pin_memory,
+        'persistent_workers': args.persistent_workers,
+        'prefetch_factor': args.prefetch_factor,
+    }
+    non_blocking = checkattr(args, 'non_blocking')
+
 
     # Create plots- and results-directories if needed
     if not os.path.isdir(args.r_dir):
@@ -202,6 +211,8 @@ def run(args, verbose=False):
     # On what scenario will model be trained?
     model.scenario = args.scenario
     model.classes_per_context = config['classes_per_context']
+    model.data_loader_kwargs = data_loader_kwargs
+    model.non_blocking = non_blocking
 
     # Print some model-characteristics on the screen
     if verbose:
@@ -306,6 +317,17 @@ def run(args, verbose=False):
     #----- CALLBACKS -----#
     #---------------------#
 
+    plotting_dict = evaluate.initiate_plotting_dict(args.contexts) if (
+            checkattr(args, 'pdf') or checkattr(args, 'results_dict') or checkattr(args, 'drift_metrics')
+    ) else None
+    drift_tracker = None
+    if checkattr(args, 'drift_metrics'):
+        drift_tracker = {
+            "reference_context": args.drift_ref_context,
+            "repr_samples": args.drift_repr_samples,
+            "reference_state": None,
+        }
+
     # Setting up Visdom environment
     if utils.checkattr(args, 'visdom'):
         if verbose:
@@ -328,7 +350,7 @@ def run(args, verbose=False):
     # Callbacks for reporting and visualizing accuracy
     eval_cbs = [
         cb._eval_cb(log=args.acc_log, test_datasets=test_datasets, visdom=visdom, iters_per_context=args.iters,
-                    test_size=args.acc_n)
+                    test_size=args.acc_n, plotting_dict=plotting_dict, drift_tracker=drift_tracker)
     ]
 
     #-------------------------------------------------------------------------------------------------#
@@ -406,6 +428,39 @@ def run(args, verbose=False):
     output_file = open(file_name, 'w')
     output_file.write('{}\n'.format(average_accs))
     output_file.close()
+    if checkattr(args, 'results_dict') and plotting_dict is not None:
+        file_name = "{}/dict-{}--n{}{}".format(args.r_dir, param_stamp, "All" if args.acc_n is None else args.acc_n,
+                                               "--S{}".format(args.eval_s) if checkattr(args, 'gen_classifier') else "")
+        utils.save_object(plotting_dict, file_name)
+
+    if checkattr(args, 'pdf') and plotting_dict is not None:
+        plot_name = "{}/{}.pdf".format(args.p_dir, param_stamp)
+        pp = visual_plt.open_pdf(plot_name)
+        figure_list = []
+        plot_list = []
+        for i in range(args.contexts):
+            plot_list.append(plotting_dict["acc per context"]["context {}".format(i + 1)])
+        figure = visual_plt.plot_lines(
+            plot_list, x_axes=plotting_dict["x_context"],
+            line_names=['context {}'.format(i + 1) for i in range(args.contexts)]
+        )
+        figure_list.append(figure)
+        figure = visual_plt.plot_lines(
+            [plotting_dict["average"]], x_axes=plotting_dict["x_context"],
+            line_names=['average all contexts so far']
+        )
+        figure_list.append(figure)
+        if checkattr(args, 'drift_metrics') and len(plotting_dict["drift"]["x_context"]) > 0:
+            figure = visual_plt.plot_lines(
+                [plotting_dict["drift"]["param_cos_similarity"],
+                 plotting_dict["drift"]["representational_cos_similarity"]],
+                x_axes=plotting_dict["drift"]["x_context"],
+                line_names=['param_cos_similarity', 'representational_cos_similarity']
+            )
+            figure_list.append(figure)
+        for figure in figure_list:
+            pp.savefig(figure)
+        pp.close()
 
 
 

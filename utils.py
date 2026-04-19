@@ -26,7 +26,8 @@ def checkattr(args, attr):
 ## Data-handling functions ##
 #############################
 
-def get_data_loader(dataset, batch_size, cuda=False, drop_last=False, augment=False):
+def get_data_loader(dataset, batch_size, cuda=False, drop_last=False, augment=False,
+                    num_workers=0, pin_memory=None, persistent_workers=False, prefetch_factor=None):
     '''Return <DataLoader>-object for the provided <DataSet>-object [dataset].'''
 
     # If requested, make copy of original dataset to add augmenting transform (without altering original dataset)
@@ -36,11 +37,23 @@ def get_data_loader(dataset, batch_size, cuda=False, drop_last=False, augment=Fa
     else:
         dataset_ = dataset
 
+    # Keep legacy behavior by default: pinned memory only when CUDA is used.
+    pin_memory = cuda if pin_memory is None else pin_memory
+
+    loader_kwargs = {
+        'batch_size': batch_size,
+        'shuffle': True,
+        'drop_last': drop_last,
+        'num_workers': max(0, num_workers),
+        'pin_memory': pin_memory,
+    }
+    if loader_kwargs['num_workers'] > 0:
+        loader_kwargs['persistent_workers'] = persistent_workers
+        if prefetch_factor is not None:
+            loader_kwargs['prefetch_factor'] = prefetch_factor
+
     # Create and return the <DataLoader>-object
-    return DataLoader(
-        dataset_, batch_size=batch_size, shuffle=True, drop_last=drop_last,
-        **({'num_workers': 0, 'pin_memory': True} if cuda else {})
-    )
+    return DataLoader(dataset_, **loader_kwargs)
 
 def to_one_hot(y, classes):
     '''Convert a nd-array with integers [y] to a 2D "one-hot" tensor.'''
