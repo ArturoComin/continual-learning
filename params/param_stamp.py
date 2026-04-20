@@ -139,6 +139,20 @@ def get_param_stamp(args, model_name, verbose=True, replay_model_name=None, feat
         xdg_stamp = "--XdG{}".format(args.gating_prop)
         if verbose:
             print(" --> XdG:           " + "gating = {}".format(args.gating_prop))
+    syn_turnover_stamp = ""
+    if checkattr(args, "syn_turnover"):
+        syn_turnover_stamp = "--synT-e{}-f{}-b{}-w{}".format(
+            int(args.syn_turnover_every) if hasattr(args, "syn_turnover_every") else 100,
+            "{:.4f}".format(
+                float(args.syn_turnover_frac) if hasattr(args, "syn_turnover_frac") else 0.01
+            ).rstrip("0").rstrip("."),
+            "{:.4f}".format(
+                float(args.syn_turnover_beta) if hasattr(args, "syn_turnover_beta") else 0.99
+            ).rstrip("0").rstrip("."),
+            int(args.syn_turnover_warmup) if hasattr(args, "syn_turnover_warmup") else 0,
+        )
+        if verbose:
+            print(" --> syn turnover:  " + syn_turnover_stamp.replace("--", "", 1))
 
     # -for replay / functional regularization (except FROMP)
     replay_stamp = ""
@@ -190,9 +204,9 @@ def get_param_stamp(args, model_name, verbose=True, replay_model_name=None, feat
             stream_stamp = '--upEv{}'.format(args.update_every)
 
     # --> combine
-    param_stamp = "{}--{}--{}{}{}{}{}{}{}{}".format(
+    param_stamp = "{}--{}--{}{}{}{}{}{}{}{}{}".format(
         problem_stamp, model_stamp, train_stamp, param_reg_stamp, xdg_stamp, replay_stamp, memory_buffer_stamp,
-        bin_stamp, stream_stamp, "-s{}".format(args.seed) if not args.seed==0 else ""
+        bin_stamp, stream_stamp, syn_turnover_stamp, "-s{}".format(args.seed) if not args.seed==0 else ""
     )
 
     ## Print param-stamp on screen and return

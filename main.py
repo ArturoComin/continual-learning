@@ -190,6 +190,19 @@ def run(args, verbose=False):
     model.neg_samples = args.neg_samples if hasattr(args, 'neg_samples') else "all"
     model.data_loader_kwargs = data_loader_kwargs
     model.non_blocking = non_blocking
+    model.syn_turnover = checkattr(args, "syn_turnover")
+    model.syn_turnover_every = (
+        args.syn_turnover_every if hasattr(args, "syn_turnover_every") else 100
+    )
+    model.syn_turnover_frac = (
+        args.syn_turnover_frac if hasattr(args, "syn_turnover_frac") else 0.01
+    )
+    model.syn_turnover_beta = (
+        args.syn_turnover_beta if hasattr(args, "syn_turnover_beta") else 0.99
+    )
+    model.syn_turnover_warmup = (
+        args.syn_turnover_warmup if hasattr(args, "syn_turnover_warmup") else 0
+    )
 
     # Print some model-characteristics on the screen
     if verbose:

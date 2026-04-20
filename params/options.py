@@ -549,6 +549,42 @@ def add_cl_options(
             help="# of hidden units with separate network per context",
         )
 
+    ## Synaptic turnover
+    syn_turnover = parser.add_argument_group("Synaptic Turnover")
+    syn_turnover.add_argument(
+        "--syn-turnover",
+        action="store_true",
+        help="enable activity-based synaptic turnover for fully connected layers",
+    )
+    syn_turnover.add_argument(
+        "--syn-turnover-every",
+        type=int,
+        default=100,
+        metavar="N",
+        help="apply turnover every N optimizer steps",
+    )
+    syn_turnover.add_argument(
+        "--syn-turnover-frac",
+        type=float,
+        default=0.01,
+        metavar="PROP",
+        help="fraction of active FC connections to prune and regrow per turnover event",
+    )
+    syn_turnover.add_argument(
+        "--syn-turnover-beta",
+        type=float,
+        default=0.99,
+        metavar="BETA",
+        help="EMA decay for activity estimates used by turnover",
+    )
+    syn_turnover.add_argument(
+        "--syn-turnover-warmup",
+        type=int,
+        default=0,
+        metavar="N",
+        help="number of initial optimizer steps without turnover",
+    )
+
     ## Parameter regularization
     if not compare_replay:
         param_reg = parser.add_argument_group("Parameter Regularization")

@@ -1,3 +1,4 @@
+import math
 import torch
 from torch.nn import functional as F
 from models.fc.layers import fc_layer
@@ -112,6 +113,150 @@ class Classifier(ContinualLearner, MemoryBuffer):
         # Flags whether parts of the network are frozen (so they can be set to evaluation mode during training)
         self.convE.frozen = False
         self.fcE.frozen = False
+
+        # Synaptic turnover (disabled by default; configured in main.py)
+        self.syn_turnover = False
+        self.syn_turnover_every = 100
+        self.syn_turnover_frac = 0.01
+        self.syn_turnover_beta = 0.99
+        self.syn_turnover_warmup = 0
+        self._syn_turnover_step = 0
+        self._syn_turnover_layers = None
+        self._syn_turnover_masks = {}
+        self._syn_turnover_pre_activity = {}
+        self._syn_turnover_post_activity = {}
+
+    def _initialize_syn_turnover_state(self):
+        if self._syn_turnover_layers is not None:
+            return
+
+        layers = []
+        for i in range(1, self.fcE.layers + 1):
+            label = f"fcLayer{i}"
+            layers.append((label, getattr(self.fcE, label)))
+        layers.append(("classifier", self.classifier))
+        self._syn_turnover_layers = layers
+
+        for label, layer in self._syn_turnover_layers:
+            weight = layer.linear.weight.detach()
+            self._syn_turnover_masks[label] = torch.ones_like(
+                weight, dtype=torch.bool, device=weight.device
+            )
+            self._syn_turnover_pre_activity[label] = torch.zeros(
+                weight.size(1), device=weight.device
+            )
+            self._syn_turnover_post_activity[label] = torch.zeros(
+                weight.size(0), device=weight.device
+            )
+
+    def _update_syn_turnover_activity(self, x):
+        if x is None:
+            return
+        self._initialize_syn_turnover_state()
+
+        was_training = self.training
+        self.eval()
+        with torch.no_grad():
+            beta = float(self.syn_turnover_beta)
+            one_minus_beta = 1.0 - beta
+            flat = self.flatten(self.convE(x))
+            final_features, intermediate = self.fcE(flat, return_intermediate=True)
+
+            for i in range(1, self.fcE.layers + 1):
+                label = f"fcLayer{i}"
+                layer = getattr(self.fcE, label)
+                pre_in = intermediate[label]
+                out = layer(pre_in)
+                pre = pre_in.detach().abs().mean(dim=0)
+                post = out.detach().abs().mean(dim=0)
+                self._syn_turnover_pre_activity[label].mul_(beta).add_(
+                    pre, alpha=one_minus_beta
+                )
+                self._syn_turnover_post_activity[label].mul_(beta).add_(
+                    post, alpha=one_minus_beta
+                )
+            classifier_out = self.classifier(final_features)
+            classifier_pre = final_features.detach().abs().mean(dim=0)
+            classifier_post = classifier_out.detach().abs().mean(dim=0)
+            self._syn_turnover_pre_activity["classifier"].mul_(beta).add_(
+                classifier_pre, alpha=one_minus_beta
+            )
+            self._syn_turnover_post_activity["classifier"].mul_(beta).add_(
+                classifier_post, alpha=one_minus_beta
+            )
+        if was_training:
+            self.train()
+
+    def _clear_optimizer_state_for_weights(self, weight_param, index_pairs):
+        if not hasattr(self, "optimizer"):
+            return
+        state = self.optimizer.state.get(weight_param, None)
+        if not state:
+            return
+        for key, value in state.items():
+            if torch.is_tensor(value) and value.shape == weight_param.shape:
+                value[index_pairs[:, 0], index_pairs[:, 1]] = 0.0
+
+    def _apply_synaptic_turnover(self):
+        self._initialize_syn_turnover_state()
+
+        total_pruned = 0
+        total_regrown = 0
+        frac = float(self.syn_turnover_frac)
+        if frac <= 0.0:
+            return {"turnover_applied": 0, "turnover_pruned": 0, "turnover_regrown": 0}
+
+        for label, layer in self._syn_turnover_layers:
+            weight = layer.linear.weight
+            mask = self._syn_turnover_masks[label]
+            pre = self._syn_turnover_pre_activity[label]
+            post = self._syn_turnover_post_activity[label]
+            utility = torch.outer(post, pre)
+
+            active_idx = mask.nonzero(as_tuple=False)
+            if active_idx.numel() == 0:
+                continue
+            n_active = active_idx.size(0)
+            n_prune = int(frac * n_active)
+            if n_prune < 1:
+                continue
+
+            active_scores = utility[active_idx[:, 0], active_idx[:, 1]]
+            prune_order = torch.argsort(active_scores)[:n_prune]
+            pruned_idx = active_idx[prune_order]
+
+            with torch.no_grad():
+                mask[pruned_idx[:, 0], pruned_idx[:, 1]] = False
+                weight[pruned_idx[:, 0], pruned_idx[:, 1]] = 0.0
+                self._clear_optimizer_state_for_weights(weight, pruned_idx)
+
+                inactive_idx = (~mask).nonzero(as_tuple=False)
+                if inactive_idx.numel() == 0:
+                    continue
+                n_regrow = min(n_prune, inactive_idx.size(0))
+                regrow_choice = torch.randperm(
+                    inactive_idx.size(0), device=inactive_idx.device
+                )[:n_regrow]
+                regrown_idx = inactive_idx[regrow_choice]
+
+                fan_in = weight.size(1)
+                bound = 1.0 / math.sqrt(fan_in) if fan_in > 0 else 0.0
+                new_values = torch.empty(n_regrow, device=weight.device).uniform_(
+                    -bound, bound
+                )
+
+                weight[regrown_idx[:, 0], regrown_idx[:, 1]] = new_values
+                mask[regrown_idx[:, 0], regrown_idx[:, 1]] = True
+                self._clear_optimizer_state_for_weights(weight, regrown_idx)
+
+            total_pruned += n_prune
+            total_regrown += n_regrow
+
+        return {
+            "turnover_applied": 1 if (total_pruned > 0 or total_regrown > 0) else 0,
+            "turnover_pruned": total_pruned,
+            "turnover_regrown": total_regrown,
+        }
 
     def list_init_layers(self):
         """Return list of modules whose parameters could be initialized differently (i.e., conv- or fc-layers)."""
@@ -532,6 +677,24 @@ class Classifier(ContinualLearner, MemoryBuffer):
 
         ##--(5)-- TAKE THE OPTIMIZATION STEP --##
         self.optimizer.step()
+        turnover_stats = {
+            "turnover_applied": 0,
+            "turnover_pruned": 0,
+            "turnover_regrown": 0,
+        }
+        self._syn_turnover_step += 1
+        if self.syn_turnover:
+            x_turnover = x
+            if x_turnover is None and x_ is not None:
+                x_turnover = x_[0] if isinstance(x_, list) else x_
+            self._update_syn_turnover_activity(x_turnover)
+            should_apply = (
+                self._syn_turnover_step > int(self.syn_turnover_warmup)
+                and int(self.syn_turnover_every) > 0
+                and (self._syn_turnover_step % int(self.syn_turnover_every) == 0)
+            )
+            if should_apply:
+                turnover_stats = self._apply_synaptic_turnover()
 
         # Return the dictionary with different training-loss split in categories
         return {
@@ -557,4 +720,7 @@ class Classifier(ContinualLearner, MemoryBuffer):
                 weight_penalty_loss.item() if weight_penalty_loss is not None else 0
             ),
             "accuracy": accuracy if accuracy is not None else 0.0,
+            "turnover_applied": turnover_stats["turnover_applied"],
+            "turnover_pruned": turnover_stats["turnover_pruned"],
+            "turnover_regrown": turnover_stats["turnover_regrown"],
         }

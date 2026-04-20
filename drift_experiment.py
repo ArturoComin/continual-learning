@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import copy
 import os
 import time
 import numpy as np
@@ -211,6 +212,11 @@ def set_si_args(args):
     return args
 
 
+def set_turnover_args(args):
+    args.syn_turnover = True
+    return args
+
+
 if __name__ == "__main__":
     script_start = time.time()
     args = handle_inputs()
@@ -221,8 +227,10 @@ if __name__ == "__main__":
         os.mkdir(args.p_dir)
 
     strategies = {
-        "ER": set_er_args,
-        "SI": set_si_args,
+        "ER": [set_er_args],
+        "ER+Turnover": [set_er_args, set_turnover_args],
+        "SI": [set_si_args],
+        "SI+Turnover": [set_si_args, set_turnover_args],
     }
 
     seed_list = list(range(args.seed, args.seed + args.n_seeds))
@@ -248,13 +256,15 @@ if __name__ == "__main__":
         for ref_context in args.drift_ref_contexts
     }
 
-    for name, config_fn in strategies.items():
+    for name, config_fns in strategies.items():
         print("\n------{}------".format(name))
         strategy_start = time.time()
         for seed in seed_list:
             seed_start = time.time()
             print(" [{}] seed {} | preparing run args".format(name, seed))
-            run_args = config_fn(args)
+            run_args = copy.deepcopy(args)
+            for config_fn in config_fns:
+                run_args = config_fn(run_args)
             run_args.seed = seed
             print(" [{}] seed {} | run_and_collect start".format(name, seed))
             plotting_dict = run_and_collect(run_args)
@@ -361,12 +371,12 @@ if __name__ == "__main__":
     pdf_name = _get_unique_pdf_path(base_pdf_name)
     pp = visual_plt.open_pdf(pdf_name)
     strategy_names = list(strategies.keys())
-    colors = ["red", "yellowgreen"]
+    colors = ["red", "salmon", "yellowgreen", "olivedrab"]
 
     metric_specs = [
         ("current_task_acc", "Current-task accuracy", (0, 1)),
         ("average_acc_so_far", "Average accuracy (all tasks so far)", (0, 1)),
-        ("task_n_acc", "Accuracy on task n", (0, 1)),
+        ("task_n_acc", f"Accuracy on task {ref_context}", (0, 1)),
         ("param_cos_similarity", "Parameter drift (1 - cosine similarity)", (0, 2)),
         (
             "representational_cos_similarity",
