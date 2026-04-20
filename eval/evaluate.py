@@ -144,6 +144,13 @@ def initiate_plotting_dict(n_contexts):
         "x_context": [],
         "snapshots": {},
     }
+    plotting_dict["lop"] = {
+        "dead_unit_fraction": [],
+        "effective_rank": [],
+        "weight_magnitude": [],
+        "x_iteration": [],
+        "x_context": [],
+    }
     return plotting_dict
 
 
@@ -261,6 +268,119 @@ def append_drift_snapshot(plotting_dict, current_context, snapshot):
     key = str(current_context)
     if key not in plotting_dict["drift"]["snapshots"]:
         plotting_dict["drift"]["snapshots"][key] = snapshot
+
+
+def _mean_abs_weight_magnitude(model):
+    eval_model = model
+    if hasattr(model, "label") and model.label == "SeparateClassifiers":
+        eval_model = getattr(model, "context1")
+    total_abs = 0.0
+    n_params = 0
+    with torch.no_grad():
+        for param in eval_model.parameters():
+            if param.requires_grad:
+                total_abs += param.detach().float().abs().sum().item()
+                n_params += param.numel()
+    return total_abs / max(n_params, 1)
+
+
+@torch.no_grad()
+def _dead_unit_fraction(model, dataset, context_id=0, max_samples=256, batch_size=128):
+    eval_model = _extract_model_for_context(model, context_id)
+    device = eval_model.device if hasattr(eval_model, 'device') else eval_model._device()
+    cuda = eval_model.cuda if hasattr(eval_model, 'cuda') else eval_model._is_on_cuda()
+
+    mode = eval_model.training
+    eval_model.eval()
+
+    if hasattr(eval_model, "mask_dict") and eval_model.mask_dict is not None:
+        eval_model.apply_XdGmask(context=context_id + 1)
+
+    activation_batches = []
+    collected = 0
+    data_loader = get_data_loader(dataset, batch_size=batch_size, cuda=cuda)
+    for x, _ in data_loader:
+        if collected >= max_samples:
+            break
+        x = x.to(device)
+        h = eval_model.flatten(eval_model.convE(x))
+        for lay_id in range(1, eval_model.fcE.layers + 1):
+            layer = getattr(eval_model.fcE, "fcLayer{}".format(lay_id))
+            h = layer(h)
+        activation_batches.append(h.detach().float().cpu())
+        collected += h.shape[0]
+
+    eval_model.train(mode=mode)
+
+    if len(activation_batches) == 0:
+        return float("nan")
+    activations = torch.cat(activation_batches, dim=0)[:max_samples]
+    return (activations == 0).all(dim=0).float().mean().item()
+
+
+@torch.no_grad()
+def _effective_rank(model, dataset, context_id=0, max_samples=256, batch_size=128, eps=1e-9):
+    eval_model = _extract_model_for_context(model, context_id)
+    device = eval_model.device if hasattr(eval_model, 'device') else eval_model._device()
+    cuda = eval_model.cuda if hasattr(eval_model, 'cuda') else eval_model._is_on_cuda()
+
+    mode = eval_model.training
+    eval_model.eval()
+
+    if hasattr(eval_model, "mask_dict") and eval_model.mask_dict is not None:
+        eval_model.apply_XdGmask(context=context_id + 1)
+
+    feature_batches = []
+    collected = 0
+    data_loader = get_data_loader(dataset, batch_size=batch_size, cuda=cuda)
+    for x, _ in data_loader:
+        if collected >= max_samples:
+            break
+        x = x.to(device)
+        features = eval_model.feature_extractor(x)
+        feature_batches.append(features.detach().float().cpu().view(features.shape[0], -1))
+        collected += features.shape[0]
+
+    eval_model.train(mode=mode)
+
+    if len(feature_batches) == 0:
+        return float("nan")
+    h = torch.cat(feature_batches, dim=0)[:max_samples]
+    if h.size(0) < 2:
+        return float("nan")
+    h = h - h.mean(dim=0, keepdim=True)
+    try:
+        singular_values = torch.linalg.svdvals(h)
+    except RuntimeError:
+        singular_values = torch.svd(h)[1]
+    singular_values = singular_values[singular_values > eps]
+    if singular_values.numel() == 0:
+        return float("nan")
+    p = (singular_values ** 2) / (singular_values ** 2).sum()
+    entropy = -(p * (p + eps).log()).sum()
+    return torch.exp(entropy).item()
+
+
+def compute_lop_metrics(model, dataset, context_id=0, metric_samples=256, batch_size=128):
+    return {
+        "dead_unit_fraction": _dead_unit_fraction(
+            model, dataset, context_id=context_id, max_samples=metric_samples, batch_size=batch_size
+        ),
+        "effective_rank": _effective_rank(
+            model, dataset, context_id=context_id, max_samples=metric_samples, batch_size=batch_size
+        ),
+        "weight_magnitude": _mean_abs_weight_magnitude(model),
+    }
+
+
+def append_lop_metrics_to_plotting_dict(plotting_dict, lop_metrics, iteration, current_context):
+    if (plotting_dict is None) or ("lop" not in plotting_dict):
+        return
+    plotting_dict["lop"]["dead_unit_fraction"].append(lop_metrics["dead_unit_fraction"])
+    plotting_dict["lop"]["effective_rank"].append(lop_metrics["effective_rank"])
+    plotting_dict["lop"]["weight_magnitude"].append(lop_metrics["weight_magnitude"])
+    plotting_dict["lop"]["x_iteration"].append(iteration)
+    plotting_dict["lop"]["x_context"].append(current_context)
 
 
 ####--------------------------------------------------------------------------------------------------------------####

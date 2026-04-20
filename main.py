@@ -420,6 +420,15 @@ def run(args, verbose=False):
                     iters_per_context=args.iters, test_size=args.acc_n, S=args.eval_s if hasattr(args, 'eval_s') else 1,
                     drift_tracker=drift_tracker)
     ]
+    lop_metric_cbs = [
+        cb._lop_metrics_cb(
+            log=args.iters,
+            train_datasets=train_datasets,
+            plotting_dict=plotting_dict,
+            iters_per_context=args.iters,
+            metric_samples=args.lop_metric_samples if hasattr(args, "lop_metric_samples") else 256,
+        )
+    ] if checkattr(args, "lop_metrics") else [None]
 
     #-------------------------------------------------------------------------------------------------#
 
@@ -444,7 +453,7 @@ def run(args, verbose=False):
         # -perform training
         train_fn(
             model, train_datasets, iters=args.iters, batch_size=args.batch, baseline=baseline,
-            sample_cbs=sample_cbs, eval_cbs=eval_cbs, loss_cbs=loss_cbs, context_cbs=context_cbs,
+            sample_cbs=sample_cbs, eval_cbs=eval_cbs, loss_cbs=loss_cbs, context_cbs=context_cbs + lop_metric_cbs,
             # -if using generative replay with a separate generative model:
             generator=generator, gen_iters=args.g_iters if hasattr(args, 'g_iters') else args.iters,
             gen_loss_cbs=generator_loss_cbs,

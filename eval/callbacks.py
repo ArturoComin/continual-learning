@@ -94,6 +94,30 @@ def _eval_cb(log, test_datasets, visdom=None, plotting_dict=None, iters_per_cont
     return eval_cb if (visdom is not None) or (plotting_dict is not None) else None
 
 
+def _lop_metrics_cb(log, train_datasets, plotting_dict=None, iters_per_context=None, metric_samples=256):
+    '''Initiates function for computing LOP-specific diagnostics at context boundaries.'''
+
+    def lop_cb(classifier, batch, context=1):
+        iteration = batch if (context is None or context == 1) else (context - 1) * iters_per_context + batch
+        if iteration % log != 0:
+            return
+        if plotting_dict is None:
+            return
+        context_id = 0 if context is None else max(context - 1, 0)
+        context_id = min(context_id, len(train_datasets) - 1)
+        metrics = evaluate.compute_lop_metrics(
+            classifier,
+            train_datasets[context_id],
+            context_id=context_id,
+            metric_samples=metric_samples,
+        )
+        evaluate.append_lop_metrics_to_plotting_dict(
+            plotting_dict, metrics, iteration=iteration, current_context=context if context is not None else 1
+        )
+
+    return lop_cb if plotting_dict is not None else None
+
+
 ##------------------------------------------------------------------------------------------------------------------##
 
 ########################################################################
