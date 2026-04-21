@@ -59,6 +59,9 @@ def train_cl(model, train_datasets, iters=2000, batch_size=32, baseline='none',
 
     # Loop over all contexts.
     for context, train_dataset in enumerate(train_datasets, 1):
+        online_correct = 0.0
+        online_seen = 0
+        track_online = checkattr(model, "online_testing")
 
         # If using the "joint" baseline, skip to last context, as model is only be trained once on data of all contexts
         if baseline=='joint':
@@ -325,6 +328,10 @@ def train_cl(model, train_datasets, iters=2000, batch_size=32, baseline='none',
                 # Train the main model with this batch
                 loss_dict = model.train_a_batch(x, y, x_=x_, y_=y_, scores=scores, scores_=scores_, rnt = 1./context,
                                                 contexts_=context_used, active_classes=active_classes, context=context)
+                if track_online and x is not None:
+                    batch_n = x.size(0)
+                    online_correct += float(loss_dict.get('accuracy', 0.0)) * batch_n
+                    online_seen += batch_n
 
                 # Update running parameter importance estimates in W (needed for SI)
                 if isinstance(model, ContinualLearner) and model.importance_weighting=='si':
@@ -408,6 +415,11 @@ def train_cl(model, train_datasets, iters=2000, batch_size=32, baseline='none',
         for context_cb in context_cbs:
             if context_cb is not None:
                 context_cb(model, iters, context=context)
+        if track_online and hasattr(model, 'plotting_dict') and model.plotting_dict is not None:
+            online_acc = (online_correct / online_seen) if online_seen > 0 else 0.0
+            model.plotting_dict["online_acc"]["per_context"].append(online_acc)
+            model.plotting_dict["online_acc"]["x_context"].append(context)
+            model.plotting_dict["online_acc"]["x_iteration"].append(context * iters)
 
         # REPLAY: update source for replay
         if context<len(train_datasets) and hasattr(model, 'replay_mode'):

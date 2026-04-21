@@ -278,9 +278,9 @@ def init_params(model, args, verbose=False):
     model.apply(utils.weight_reset)
     # - initialize parameters according to chosen custom initialization (if requested)
     if hasattr(args, 'init_weight') and not args.init_weight=="standard":
-        utils.weight_init(model, strategy="xavier_normal")
+        utils.weight_init(model, strategy=args.init_weight)
     if hasattr(args, 'init_bias') and not args.init_bias=="standard":
-        utils.bias_init(model, strategy="constant", value=0.01)
+        utils.bias_init(model, strategy=args.init_bias, value=0.01)
 
     ## Use pre-training
     if checkattr(args, "pre_convE") and hasattr(model, 'depth') and model.depth>0:

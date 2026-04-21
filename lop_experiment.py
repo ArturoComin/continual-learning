@@ -131,6 +131,16 @@ def _extract_series_by_context(plotting_dict, section, field, n_contexts):
 
 
 def _extract_acc_series(plotting_dict, n_contexts):
+    online = plotting_dict.get("online_acc", {})
+    online_values = online.get("per_context", [])
+    online_x_context = online.get("x_context", [])
+    if len(online_values) > 0 and len(online_x_context) == len(online_values):
+        values = []
+        for context_id in range(1, n_contexts + 1):
+            indices = [i for i, x in enumerate(online_x_context) if x == context_id]
+            values.append(online_values[indices[-1]] if len(indices) > 0 else np.nan)
+        return values
+
     x_context = plotting_dict.get("x_context", [])
     per_context = plotting_dict.get("acc per context", {})
     values = []
@@ -155,8 +165,8 @@ def plot_lop_metrics(plotting_dict, args, param_stamp):
     fig, axes = plt.subplots(2, 2, figsize=(11, 8))
     ax_acc, ax_dead, ax_rank, ax_weight = axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1]
 
-    ax_acc.plot(contexts, acc, label="current_task_acc")
-    ax_acc.set_title("Current task accuracy")
+    ax_acc.plot(contexts, acc, label="online_task_acc")
+    ax_acc.set_title("Online task accuracy")
     ax_acc.set_xlabel("task")
 
     ax_dead.plot(contexts, dead_units, label="dead_unit_fraction", color="tab:red")
