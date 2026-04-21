@@ -166,6 +166,8 @@ def weight_init(model, strategy="xavier_normal", std=0.01):
 
     [xavier_normal]     "normalized initialization" (Glorot & Bengio, 2010) with Gaussian distribution
     [xavier_uniform]    "normalized initialization" (Glorot & Bengio, 2010) with uniform distribution
+    [kaiming_normal]    "normalized initialization" (He et al., 2015) with Gaussian distribution
+    [kaiming_uniform]   "normalized initialization" (He et al., 2015) with uniform distribution
     [normal]            initialize with Gaussian(mean=0, std=[std])
     [...]               ...'''
 
@@ -183,6 +185,10 @@ def weight_init(model, strategy="xavier_normal", std=0.01):
                 nn.init.xavier_normal_(p)
             elif strategy=="xavier_uniform":
                 nn.init.xavier_uniform_(p)
+            elif strategy=="kaiming_normal":
+                nn.init.kaiming_normal_(p)
+            elif strategy=="kaiming_uniform":
+                nn.init.kaiming_uniform_(p)
             elif strategy=="normal":
                 nn.init.normal_(p, std=std)
             else:

@@ -137,6 +137,11 @@ def initiate_plotting_dict(n_contexts):
                                        #                                            Class-IL -> all classes so far
     plotting_dict["x_iteration"] = []  # total number of iterations so far
     plotting_dict["x_context"] = []    # number of contexts so far (i.e., context on which training just finished)
+    plotting_dict["online_acc"] = {
+        "per_context": [],
+        "x_context": [],
+        "x_iteration": [],
+    }
     plotting_dict["drift"] = {
         "param_cos_similarity": [],
         "representational_cos_similarity": [],

@@ -157,6 +157,11 @@ def add_eval_options(
         help="# samples to evaluate accuracy (after each context)",
     )
     eval_params.add_argument(
+        "--online-testing",
+        action="store_true",
+        help="track online per-task accuracy during training and skip standard test-set evaluations",
+    )
+    eval_params.add_argument(
         "--drift-metrics",
         action="store_true",
         help="track parameter / representation cosine similarity across contexts",
@@ -436,6 +441,27 @@ def add_train_options(
     )
     train_params.add_argument(
         "--freeze-convE", action="store_true", help="freeze convE-layers"
+    )
+    train_params.add_argument(
+        "--init-weight",
+        type=str,
+        default="standard",
+        choices=[
+            "standard",
+            "xavier_normal",
+            "xavier_uniform",
+            "normal",
+            "kaiming_normal",
+            "kaiming_uniform",
+        ],
+        help="weight initialization strategy (default: %(default)s)",
+    )
+    train_params.add_argument(
+        "--init-bias",
+        type=str,
+        default="standard",
+        choices=["standard", "zero", "constant", "positive", "any"],
+        help="bias initialization strategy (default: %(default)s)",
     )
     # -for Class-IL, which output units should be set to 'active'?
     if (not pretrain) and (not no_boundaries):

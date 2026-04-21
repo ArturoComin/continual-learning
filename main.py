@@ -366,6 +366,8 @@ def run(args, verbose=False):
     plotting_dict = evaluate.initiate_plotting_dict(args.contexts) if (
             checkattr(args, 'pdf') or checkattr(args, 'results_dict')
     ) else None
+    model.plotting_dict = plotting_dict
+    model.online_testing = checkattr(args, "online_testing")
     drift_tracker = None
     if checkattr(args, 'drift_metrics'):
         if plotting_dict is None:
@@ -412,14 +414,16 @@ def run(args, verbose=False):
     eval_cbs = [
         cb._eval_cb(log=args.acc_log, test_datasets=test_datasets, visdom=visdom, iters_per_context=args.iters,
                     test_size=args.acc_n, drift_tracker=drift_tracker)
-    ] if (not checkattr(args, 'prototypes')) and (not checkattr(args, 'gen_classifier')) else [None]
+    ] if (not checkattr(args, 'online_testing')) and (not checkattr(args, 'prototypes')) and (
+        not checkattr(args, 'gen_classifier')
+    ) else [None]
     # -after each context, for plotting in pdf (when using prototypes / generative classifier, this is also for visdom)
     context_cbs = [
         cb._eval_cb(log=args.iters, test_datasets=test_datasets, plotting_dict=plotting_dict,
                     visdom=visdom if checkattr(args, 'prototypes') or checkattr(args, 'gen_classifier') else None,
                     iters_per_context=args.iters, test_size=args.acc_n, S=args.eval_s if hasattr(args, 'eval_s') else 1,
                     drift_tracker=drift_tracker)
-    ]
+    ] if not checkattr(args, 'online_testing') else [None]
     lop_metric_cbs = [
         cb._lop_metrics_cb(
             log=args.iters,
@@ -494,28 +498,32 @@ def run(args, verbose=False):
     if checkattr(args, 'gen_classifier'):
         model.S = args.eval_s
 
-    # Evaluate accuracy of final model on full test-set
-    if verbose:
-        print("\n Accuracy of final model on test-set:")
-    accs = []
-    for i in range(args.contexts):
-        acc = evaluate.test_acc(
-            model, test_datasets[i], verbose=False, test_size=None, context_id=i, allowed_classes=list(
-                range(config['classes_per_context']*i, config['classes_per_context']*(i+1))
-            ) if (args.scenario=="task" and not checkattr(args, 'singlehead')) else None,
-        )
+    if checkattr(args, "online_testing"):
         if verbose:
-            print(" - Context {}: {:.4f}".format(i + 1, acc))
-        accs.append(acc)
-    average_accs = sum(accs) / args.contexts
-    if verbose:
-        print('=> average accuracy over all {} contexts: {:.4f}\n\n'.format(args.contexts, average_accs))
-    # -write out to text file
-    file_name = "{}/acc-{}{}.txt".format(args.r_dir, param_stamp,
-                                         "--S{}".format(args.eval_s) if checkattr(args, 'gen_classifier') else "")
-    output_file = open(file_name, 'w')
-    output_file.write('{}\n'.format(average_accs))
-    output_file.close()
+            print("\n Online testing enabled: skipping standard test-set evaluation.\n")
+    else:
+        # Evaluate accuracy of final model on full test-set
+        if verbose:
+            print("\n Accuracy of final model on test-set:")
+        accs = []
+        for i in range(args.contexts):
+            acc = evaluate.test_acc(
+                model, test_datasets[i], verbose=False, test_size=None, context_id=i, allowed_classes=list(
+                    range(config['classes_per_context']*i, config['classes_per_context']*(i+1))
+                ) if (args.scenario=="task" and not checkattr(args, 'singlehead')) else None,
+            )
+            if verbose:
+                print(" - Context {}: {:.4f}".format(i + 1, acc))
+            accs.append(acc)
+        average_accs = sum(accs) / args.contexts
+        if verbose:
+            print('=> average accuracy over all {} contexts: {:.4f}\n\n'.format(args.contexts, average_accs))
+        # -write out to text file
+        file_name = "{}/acc-{}{}.txt".format(args.r_dir, param_stamp,
+                                             "--S{}".format(args.eval_s) if checkattr(args, 'gen_classifier') else "")
+        output_file = open(file_name, 'w')
+        output_file.write('{}\n'.format(average_accs))
+        output_file.close()
     # -if requested, also save the results-dict (with accuracy after each task)
     if checkattr(args, 'results_dict'):
         file_name = "{}/dict-{}--n{}{}".format(args.r_dir, param_stamp, "All" if args.acc_n is None else args.acc_n,
