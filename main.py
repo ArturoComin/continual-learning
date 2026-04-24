@@ -426,7 +426,8 @@ def run(args, verbose=False):
     # -after each [acc_log], for visdom
     eval_cbs = [
         cb._eval_cb(log=args.acc_log, test_datasets=test_datasets, visdom=visdom, iters_per_context=args.iters,
-                    test_size=args.acc_n, drift_tracker=drift_tracker)
+                    test_size=args.acc_n, drift_tracker=drift_tracker,
+                    eval_all_contexts=checkattr(args, "eval_all_contexts"))
     ] if (not checkattr(args, 'online_testing')) and (not checkattr(args, 'prototypes')) and (
         not checkattr(args, 'gen_classifier')
     ) else [None]
@@ -435,7 +436,7 @@ def run(args, verbose=False):
         cb._eval_cb(log=args.iters, test_datasets=test_datasets, plotting_dict=plotting_dict,
                     visdom=visdom if checkattr(args, 'prototypes') or checkattr(args, 'gen_classifier') else None,
                     iters_per_context=args.iters, test_size=args.acc_n, S=args.eval_s if hasattr(args, 'eval_s') else 1,
-                    drift_tracker=drift_tracker)
+                    drift_tracker=drift_tracker, eval_all_contexts=checkattr(args, "eval_all_contexts"))
     ] if not checkattr(args, 'online_testing') else [None]
     lop_metric_cbs = [
         cb._lop_metrics_cb(
@@ -539,8 +540,11 @@ def run(args, verbose=False):
         output_file.close()
     # -if requested, also save the results-dict (with accuracy after each task)
     if checkattr(args, 'results_dict'):
-        file_name = "{}/dict-{}--n{}{}".format(args.r_dir, param_stamp, "All" if args.acc_n is None else args.acc_n,
-                                               "--S{}".format(args.eval_s) if checkattr(args, 'gen_classifier') else "")
+        file_suffix = "--S{}".format(args.eval_s) if checkattr(args, 'gen_classifier') else ""
+        file_suffix += "--evalAll" if checkattr(args, "eval_all_contexts") else ""
+        file_name = "{}/dict-{}--n{}{}".format(
+            args.r_dir, param_stamp, "All" if args.acc_n is None else args.acc_n, file_suffix
+        )
         utils.save_object(plotting_dict, file_name)
 
     #-------------------------------------------------------------------------------------------------#

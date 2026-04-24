@@ -36,6 +36,23 @@ def handle_inputs():
         default=None,
         help="one or more reference contexts for post-hoc drift plots (e.g. --drift-ref-contexts 1 2 10)",
     )
+    parser.add_argument(
+        "--naive-ft-lr-adam",
+        type=float,
+        default=None,
+        help="learning rate for the Naive FT (Adam) baseline (default: uses --lr)",
+    )
+    parser.add_argument(
+        "--naive-ft-lr-sgd",
+        type=float,
+        default=0.01,
+        help="learning rate for the Naive FT (SGD) baseline",
+    )
+    parser.add_argument(
+        "--eval-all-contexts",
+        action="store_true",
+        help="use evaluate.test_all instead of test_all_so_far (off by default)",
+    )
     args = parser.parse_args()
 
     # Fixed experiment setup for this script.
@@ -64,6 +81,7 @@ def handle_inputs():
 def _dict_file_prefix(args):
     param_stamp = get_param_stamp_from_args(args)
     suffix = "--S{}".format(args.eval_s) if checkattr(args, "gen_classifier") else ""
+    suffix += "--evalAll" if checkattr(args, "eval_all_contexts") else ""
     dict_prefix = "{}/dict-{}--n{}{}".format(
         args.r_dir, param_stamp, "All" if args.acc_n is None else args.acc_n, suffix
     )
@@ -87,20 +105,53 @@ def _get_unique_pdf_path(base_path):
         counter += 1
 
 
+def _has_valid_plotting_data(plotting_dict, expected_contexts):
+    if not isinstance(plotting_dict, dict):
+        return False
+    x_context = plotting_dict.get("x_context", [])
+    averages = plotting_dict.get("average", [])
+    per_context = plotting_dict.get("acc per context", {})
+    if len(x_context) == 0 or len(averages) == 0:
+        return False
+    if len(x_context) != len(averages):
+        return False
+    if expected_contexts is not None and len(x_context) < expected_contexts:
+        return False
+    if not isinstance(per_context, dict):
+        return False
+    for context_id in range(1, expected_contexts + 1):
+        key = "context {}".format(context_id)
+        if key not in per_context:
+            return False
+        if len(per_context[key]) != len(x_context):
+            return False
+    return True
+
+
 def run_and_collect(args):
     start_time = time.time()
     dict_prefix, param_stamp = _dict_file_prefix(args)
     acc_file = _acc_file(args, param_stamp)
+    model_file = "{}/mM-{}".format(args.m_dir, param_stamp)
 
     if os.path.isfile(dict_prefix + ".pkl"):
         print(" already run (dict): {}".format(param_stamp))
-    elif os.path.isfile(acc_file):
-        print(" already run (acc): {}".format(param_stamp))
-        args.train = False
-        main.run(args)
-    elif os.path.isfile("{}/mM-{}".format(args.m_dir, param_stamp)):
-        print(" ...testing: {}".format(param_stamp))
-        args.train = False
+        plotting_dict = utils.load_object(dict_prefix)
+        if not _has_valid_plotting_data(plotting_dict, expected_contexts=args.contexts):
+            print(
+                " cached dict invalid/empty -> rebuilding: {}.pkl".format(dict_prefix)
+            )
+            os.remove(dict_prefix + ".pkl")
+            args.train = True
+            main.run(args)
+    elif os.path.isfile(acc_file) or os.path.isfile(model_file):
+        source = "acc" if os.path.isfile(acc_file) else "checkpoint"
+        print(
+            " found {} but missing dict -> rerunning training: {}".format(
+                source, param_stamp
+            )
+        )
+        args.train = True
         main.run(args)
     else:
         print(" ...running: {}".format(param_stamp))
@@ -136,6 +187,38 @@ def extract_series_by_context(plotting_dict, series, n_contexts, x_key="x_contex
             values.append(np.nan)
             continue
         values.append(series[indices[-1]])
+    return values
+
+
+def extract_series_over_contexts(
+    plotting_dict, series, n_contexts, x_key="x_context", fill_before_first=np.nan
+):
+    x_context = plotting_dict[x_key]
+    values = []
+    latest_seen = fill_before_first
+    for context_id in range(1, n_contexts + 1):
+        indices = [i for i, x in enumerate(x_context) if x == context_id]
+        if len(indices) > 0:
+            latest_seen = series[indices[-1]]
+        values.append(latest_seen)
+    return values
+
+
+def extract_average_acc_so_far(plotting_dict, n_contexts):
+    x_context = plotting_dict["x_context"]
+    per_context = plotting_dict["acc per context"]
+    values = []
+    for context_id in range(1, n_contexts + 1):
+        indices = [i for i, x in enumerate(x_context) if x == context_id]
+        if len(indices) == 0:
+            values.append(np.nan)
+            continue
+        index = indices[-1]
+        accs_so_far = [
+            per_context["context {}".format(task_id)][index]
+            for task_id in range(1, context_id + 1)
+        ]
+        values.append(float(np.mean(accs_so_far)))
     return values
 
 
@@ -217,6 +300,29 @@ def set_turnover_args(args):
     return args
 
 
+def set_naive_finetune_adam_args(args):
+    args.replay = "none"
+    args.weight_penalty = False
+    args.precondition = False
+    args.importance_weighting = None
+    args.optimizer = "adam"
+    if hasattr(args, "naive_ft_lr_adam") and args.naive_ft_lr_adam is not None:
+        args.lr = args.naive_ft_lr_adam
+    return args
+
+
+def set_naive_finetune_sgd_args(args):
+    args.replay = "none"
+    args.weight_penalty = False
+    args.precondition = False
+    args.importance_weighting = None
+    args.optimizer = "sgd"
+    if hasattr(args, "naive_ft_lr_sgd") and args.naive_ft_lr_sgd is not None:
+        args.lr = args.naive_ft_lr_sgd
+    args.momentum = 0.9
+    return args
+
+
 if __name__ == "__main__":
     script_start = time.time()
     args = handle_inputs()
@@ -227,6 +333,8 @@ if __name__ == "__main__":
         os.mkdir(args.p_dir)
 
     strategies = {
+        "Naive FT (Adam)": [set_naive_finetune_adam_args],
+        "Naive FT (SGD)": [set_naive_finetune_sgd_args],
         "ER": [set_er_args],
         "ER+Turnover": [set_er_args, set_turnover_args],
         "SI": [set_si_args],
@@ -275,7 +383,9 @@ if __name__ == "__main__":
                     plotting_dict, n_contexts=run_args.contexts
                 )
             )
-            base_metrics[name]["average_acc_so_far"].append(plotting_dict["average"])
+            base_metrics[name]["average_acc_so_far"].append(
+                extract_average_acc_so_far(plotting_dict, n_contexts=run_args.contexts)
+            )
             param_cos = extract_series_by_context(
                 {"x_context": plotting_dict["drift"]["x_context"]},
                 plotting_dict["drift"]["param_cos_similarity"],
@@ -292,11 +402,23 @@ if __name__ == "__main__":
                         name, seed, ref_context
                     )
                 )
-                task_n_acc = extract_series_by_context(
-                    plotting_dict,
-                    plotting_dict["acc per context"]["context {}".format(ref_context)],
-                    n_contexts=run_args.contexts,
-                )
+                if checkattr(run_args, "eval_all_contexts"):
+                    task_n_acc = extract_series_by_context(
+                        plotting_dict,
+                        plotting_dict["acc per context"][
+                            "context {}".format(ref_context)
+                        ],
+                        n_contexts=run_args.contexts,
+                    )
+                else:
+                    task_n_acc = extract_series_over_contexts(
+                        plotting_dict,
+                        plotting_dict["acc per context"][
+                            "context {}".format(ref_context)
+                        ],
+                        n_contexts=run_args.contexts,
+                        fill_before_first=0.0,
+                    )
                 task_n_acc_by_ref[ref_context][name].append(task_n_acc)
                 param_drift, repr_drift = recompute_drift_from_snapshots(
                     plotting_dict,
@@ -371,17 +493,18 @@ if __name__ == "__main__":
     pdf_name = _get_unique_pdf_path(base_pdf_name)
     pp = visual_plt.open_pdf(pdf_name)
     strategy_names = list(strategies.keys())
-    colors = ["red", "salmon", "yellowgreen", "olivedrab"]
+    color_map = plt.get_cmap("tab10")
+    colors = [color_map(i % color_map.N) for i in range(len(strategy_names))]
 
     metric_specs = [
-        ("current_task_acc", "Current-task accuracy", (0, 1)),
-        ("average_acc_so_far", "Average accuracy (all tasks so far)", (0, 1)),
-        ("task_n_acc", f"Accuracy on task {ref_context}", (0, 1)),
-        ("param_cos_similarity", "Parameter drift (1 - cosine similarity)", (0, 2)),
+        ("current_task_acc", "Current-task accuracy", None),
+        ("average_acc_so_far", "Average accuracy (all tasks so far)", (0.6, 1)),
+        ("task_n_acc", "Accuracy on reference task", (0.6, 1)),
+        ("param_cos_similarity", "Parameter drift (1 - cosine similarity)", (0, 1)),
         (
             "representational_cos_similarity",
             "Representational drift (1 - cosine similarity)",
-            (0, 2),
+            (0, 1),
         ),
     ]
 
@@ -423,8 +546,26 @@ if __name__ == "__main__":
             ax.set_title(ylabel)
             ax.set_xlabel("Context")
             ax.set_ylabel(ylabel)
-            ax.set_ylim(ylim)
+            if metric_name == "current_task_acc":
+                y_min = 0.0
+                finite_vals = []
+                for line in ax.get_lines():
+                    ydata = np.array(line.get_ydata(), dtype=float)
+                    finite_vals.extend(ydata[np.isfinite(ydata)].tolist())
+                if len(finite_vals) > 0:
+                    y_min = max(0.0, min(finite_vals) - 0.05)
+                ax.set_ylim((y_min, 1.0))
+            elif ylim is not None:
+                ax.set_ylim(ylim)
             ax.grid(alpha=0.25)
+            if metric_name == "task_n_acc":
+                ax.axvline(
+                    ref_context,
+                    linestyle=":",
+                    color="black",
+                    linewidth=1.5,
+                    alpha=0.8,
+                )
             ax.legend()
 
         axes[5].axis("off")

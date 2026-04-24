@@ -127,6 +127,54 @@ def test_all_so_far(model, datasets, current_context, iteration, test_size=None,
             )
 
 
+def test_all(model, datasets, current_context, iteration, test_size=None, no_context_mask=False,
+             visdom=None, summary_graph=True, plotting_dict=None, verbose=False):
+    '''Evaluate accuracy of a classifier (=[model]) on all contexts in [datasets], irrespective of [current_context].
+
+    [visdom]      None or <dict> with name of "graph" and "env" (if None, no visdom-plots are made)'''
+
+    n_contexts = len(datasets)
+
+    precs = []
+    for i in range(n_contexts):
+        allowed_classes = None
+        if model.scenario == 'task' and not checkattr(model, 'singlehead'):
+            allowed_classes = list(range(model.classes_per_context * i, model.classes_per_context * (i + 1)))
+        precs.append(test_acc(
+            model, datasets[i], test_size=test_size, verbose=verbose, allowed_classes=allowed_classes,
+            no_context_mask=no_context_mask, context_id=i
+        ))
+
+    if current_context is None:
+        current_context = n_contexts
+    average_precs = sum(precs) / n_contexts
+
+    # Print results on screen
+    if verbose:
+        print(' => ave accuracy: {:.3f}'.format(average_precs))
+
+    # Add results to [plotting_dict]
+    if plotting_dict is not None:
+        for i in range(n_contexts):
+            plotting_dict['acc per context']['context {}'.format(i+1)].append(precs[i])
+        plotting_dict['average'].append(average_precs)
+        plotting_dict['x_iteration'].append(iteration)
+        plotting_dict['x_context'].append(current_context)
+
+    # Send results to visdom server
+    names = ['context {}'.format(i + 1) for i in range(n_contexts)]
+    if visdom is not None:
+        visual_visdom.visualize_scalars(
+            precs, names=names, title="accuracy ({})".format(visdom["graph"]),
+            iteration=iteration, env=visdom["env"], ylabel="test accuracy"
+        )
+        if n_contexts > 1 and summary_graph:
+            visual_visdom.visualize_scalars(
+                [average_precs], names=["ave"], title="ave accuracy ({})".format(visdom["graph"]),
+                iteration=iteration, env=visdom["env"], ylabel="test accuracy"
+            )
+
+
 def initiate_plotting_dict(n_contexts):
     '''Initiate <dict> with accuracy-measures to keep track of for plotting.'''
     plotting_dict = {}

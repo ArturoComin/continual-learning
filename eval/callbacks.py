@@ -33,7 +33,7 @@ def _sample_cb(log, config, visdom=None, test_datasets=None, sample_size=64):
 
 
 def _eval_cb(log, test_datasets, visdom=None, plotting_dict=None, iters_per_context=None, test_size=None,
-             summary_graph=True, S='mean', drift_tracker=None):
+             summary_graph=True, S='mean', drift_tracker=None, eval_all_contexts=False):
     '''Initiates function for evaluating performance of classifier (in terms of accuracy).
 
     [test_datasets]       <list> of <Datasets>; also if only 1 context, it should be presented as a list!
@@ -52,8 +52,9 @@ def _eval_cb(log, test_datasets, visdom=None, plotting_dict=None, iters_per_cont
                 classifier.S = S
 
             # Evaluate the classifier on multiple contexts (and log to visdom)
-            evaluate.test_all_so_far(classifier, test_datasets, context, iteration, test_size=test_size,
-                                     visdom=visdom, summary_graph=summary_graph, plotting_dict=plotting_dict)
+            eval_fn = evaluate.test_all if eval_all_contexts else evaluate.test_all_so_far
+            eval_fn(classifier, test_datasets, context, iteration, test_size=test_size,
+                    visdom=visdom, summary_graph=summary_graph, plotting_dict=plotting_dict)
 
             if drift_tracker is not None:
                 current_context = context
