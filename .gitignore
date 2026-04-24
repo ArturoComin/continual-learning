@@ -1,5 +1,5 @@
 .env
-
+.venv-habrok
 .ipynb_checkpoints/
 .idea/
 __pycache__/
@@ -8,5 +8,5 @@ store/models/mM*
 store/plots
 store/datasets
 store/results
-
+/log
 venv
