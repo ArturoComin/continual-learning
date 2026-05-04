@@ -123,9 +123,19 @@ def train_cl(model, train_datasets, iters=2000, batch_size=32, baseline='none',
 
         # Reset state of optimizer(s) for every context (if requested)
         if (not model.label=="SeparateClassifiers") and model.optim_type=="adam_reset":
-            model.optimizer = optim.Adam(model.optim_list, betas=(0.9, 0.999))
+            model.optimizer = optim.Adam(
+                model.optim_list,
+                betas=(model.adam_beta1, model.adam_beta2),
+                eps=model.adam_eps,
+                weight_decay=model.weight_decay,
+            )
         if (generator is not None) and generator.optim_type=="adam_reset":
-            generator.optimizer = optim.Adam(model.optim_list, betas=(0.9, 0.999))
+            generator.optimizer = optim.Adam(
+                generator.optim_list,
+                betas=(generator.adam_beta1, generator.adam_beta2),
+                eps=generator.adam_eps,
+                weight_decay=generator.weight_decay,
+            )
 
         # Initialize # iters left on current data-loader(s)
         iters_left = iters_left_previous = 1
@@ -443,6 +453,16 @@ def train_cl(model, train_datasets, iters=2000, batch_size=32, baseline='none',
                 ReplayStoredData = True
                 if model.replay_mode == "all":
                     previous_datasets = train_datasets[:context]
+                    if getattr(model, "replay_contexts", None) is not None:
+                        allowed_contexts = [
+                            context_id
+                            for context_id in model.replay_contexts
+                            if context_id < context
+                        ]
+                        previous_datasets = [
+                            train_datasets[context_id - 1]
+                            for context_id in allowed_contexts
+                        ]
                 else:
                     if per_context:
                         previous_datasets = []
@@ -460,6 +480,8 @@ def train_cl(model, train_datasets, iters=2000, batch_size=32, baseline='none',
                             lambda y, x=model.classes_per_context: y % x
                         )
                         previous_datasets = [MemorySetDataset(model.memory_sets, target_transform=target_transform)]
+                if len(previous_datasets) == 0:
+                    ReplayStoredData = False
 
 #------------------------------------------------------------------------------------------------------------#
 

@@ -375,6 +375,12 @@ def add_train_options(
         train_params.add_argument("--batch", type=int, help="mini batch size")
     train_params.add_argument("--lr", type=float, help="learning rate")
     train_params.add_argument(
+        "--weight-decay",
+        type=float,
+        default=0.0,
+        help="weight decay / L2 regularization coefficient (default: %(default)s)",
+    )
+    train_params.add_argument(
         "--num-workers",
         type=int,
         default=0,
@@ -416,6 +422,24 @@ def add_train_options(
             type=str,
             default="adam",
             choices=["adam", "sgd"] if no_boundaries else ["adam", "adam_reset", "sgd"],
+        )
+        train_params.add_argument(
+            "--adam-beta1",
+            type=float,
+            default=0.9,
+            help="beta1 used by Adam/Adam-reset (default: %(default)s)",
+        )
+        train_params.add_argument(
+            "--adam-beta2",
+            type=float,
+            default=0.999,
+            help="beta2 used by Adam/Adam-reset (default: %(default)s)",
+        )
+        train_params.add_argument(
+            "--adam-eps",
+            type=float,
+            default=1e-8,
+            help="epsilon used by Adam/Adam-reset (default: %(default)s)",
         )
         train_params.add_argument(
             "--momentum",

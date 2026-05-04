@@ -157,8 +157,18 @@ def get_param_stamp(args, model_name, verbose=True, replay_model_name=None, feat
     # -for replay / functional regularization (except FROMP)
     replay_stamp = ""
     if hasattr(args, 'replay') and not args.replay=="none":
+        replay_contexts_stamp = ""
+        if (
+            args.replay == "all"
+            and hasattr(args, "replay_contexts")
+            and args.replay_contexts is not None
+            and len(args.replay_contexts) > 0
+        ):
+            replay_contexts_stamp = "-ctx{}".format(
+                "-".join(str(c) for c in sorted(set(args.replay_contexts)))
+            )
         replay_stamp = "{rep}{KD}{use}{model}{gi}{lrg}".format(
-            rep=args.replay,
+            rep="{}{}".format(args.replay, replay_contexts_stamp),
             KD="-KD{}".format(args.temp) if checkattr(args, 'distill') else "",
             use="-{}{}".format(
                 "A-GEM" if args.use_replay=='inequality' else "both",

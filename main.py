@@ -178,10 +178,16 @@ def run(args, verbose=False):
                                         'lr': args.lr}]
             model_to_set.optim_type = args.optimizer
             if model_to_set.optim_type in ("adam", "adam_reset"):
-                model_to_set.optimizer = optim.Adam(model_to_set.optim_list, betas=(0.9, 0.999))
+                model_to_set.optimizer = optim.Adam(
+                    model_to_set.optim_list,
+                    betas=(args.adam_beta1, args.adam_beta2),
+                    eps=args.adam_eps,
+                    weight_decay=args.weight_decay,
+                )
             elif model_to_set.optim_type=="sgd":
                 model_to_set.optimizer = optim.SGD(model_to_set.optim_list,
-                                                   momentum=args.momentum if hasattr(args, 'momentum') else 0.)
+                                                   momentum=args.momentum if hasattr(args, 'momentum') else 0.,
+                                                   weight_decay=args.weight_decay)
 
     # On what scenario will model be trained? If needed, indicate whether singlehead output / how to set active classes.
     model.scenario = args.scenario
@@ -203,6 +209,10 @@ def run(args, verbose=False):
     model.syn_turnover_warmup = (
         args.syn_turnover_warmup if hasattr(args, "syn_turnover_warmup") else 0
     )
+    model.weight_decay = args.weight_decay if hasattr(args, "weight_decay") else 0.0
+    model.adam_beta1 = args.adam_beta1 if hasattr(args, "adam_beta1") else 0.9
+    model.adam_beta2 = args.adam_beta2 if hasattr(args, "adam_beta2") else 0.999
+    model.adam_eps = args.adam_eps if hasattr(args, "adam_eps") else 1e-8
 
     # Print some model-characteristics on the screen
     if verbose:
@@ -309,18 +319,33 @@ def run(args, verbose=False):
                                  'lr': args.lr_gen}]
         generator.optim_type = args.optimizer
         if generator.optim_type in ("adam", "adam_reset"):
-            generator.optimizer = optim.Adam(generator.optim_list, betas=(0.9, 0.999))
+            generator.optimizer = optim.Adam(
+                generator.optim_list,
+                betas=(args.adam_beta1, args.adam_beta2),
+                eps=args.adam_eps,
+                weight_decay=args.weight_decay,
+            )
         elif generator.optim_type == "sgd":
-            generator.optimizer = optim.SGD(generator.optim_list)
+            generator.optimizer = optim.SGD(generator.optim_list, momentum=args.momentum, weight_decay=args.weight_decay)
         # -print architecture to screen
         if verbose:
             utils.print_model_info(generator)
     else:
         generator = None
+    if generator is not None:
+        generator.weight_decay = args.weight_decay if hasattr(args, "weight_decay") else 0.0
+        generator.adam_beta1 = args.adam_beta1 if hasattr(args, "adam_beta1") else 0.9
+        generator.adam_beta2 = args.adam_beta2 if hasattr(args, "adam_beta2") else 0.999
+        generator.adam_eps = args.adam_eps if hasattr(args, "adam_eps") else 1e-8
 
     # Should the model be trained with replay?
     if isinstance(model, ContinualLearner) and hasattr(args, 'replay'):
         model.replay_mode = args.replay
+        model.replay_contexts = (
+            sorted(set(args.replay_contexts))
+            if hasattr(args, "replay_contexts") and args.replay_contexts is not None
+            else None
+        )
 
     # A-GEM: How should the gradient of the loss on replayed data be used? (added, as inequality constraint or both?)
     if isinstance(model, ContinualLearner) and hasattr(args, 'use_replay'):

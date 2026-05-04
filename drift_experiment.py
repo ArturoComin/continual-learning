@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import copy
+import json
 import os
 import time
 import numpy as np
@@ -53,6 +54,34 @@ def handle_inputs():
         action="store_true",
         help="use evaluate.test_all instead of test_all_so_far (off by default)",
     )
+    parser.add_argument(
+        "--er-replay",
+        type=str,
+        default="buffer",
+        choices=["buffer", "all"],
+        help="replay mode used by ER-based strategies in this script",
+    )
+    parser.add_argument(
+        "--replay-contexts",
+        type=int,
+        nargs="+",
+        default=None,
+        help=(
+            "optional context ids to replay when using --er-replay all "
+            "(e.g. --replay-contexts 1 2 10)"
+        ),
+    )
+    parser.add_argument(
+        "--strategy-filter",
+        type=str,
+        nargs="+",
+        default=None,
+        help=(
+            "optional subset of strategies to run; accepts names with spaces when quoted "
+            '(e.g. --strategy-filter "ER (Buffer)" "SI+Turnover") or comma-separated chunks '
+            '(e.g. --strategy-filter "ER (Buffer),SI+Turnover")'
+        ),
+    )
     args = parser.parse_args()
 
     # Fixed experiment setup for this script.
@@ -70,6 +99,13 @@ def handle_inputs():
             raise ValueError(
                 "All entries in '--drift-ref-contexts' should be in [1, --contexts]."
             )
+    if args.replay_contexts is not None:
+        args.replay_contexts = sorted(set(args.replay_contexts))
+        for replay_context in args.replay_contexts:
+            if replay_context < 1 or replay_context > args.contexts:
+                raise ValueError(
+                    "All entries in '--replay-contexts' should be in [1, --contexts]."
+                )
     args.results_dict = True
     args.pdf = False
 
@@ -276,8 +312,31 @@ def recompute_drift_from_snapshots(plotting_dict, reference_context, n_contexts)
     return param_drift, repr_drift
 
 
-def set_er_args(args):
+def set_er_buffer_args(args):
     args.replay = "buffer"
+    args.replay_contexts = None
+    args.sample_selection = "random"
+    args.use_replay = "normal"
+    args.weight_penalty = False
+    args.precondition = False
+    args.importance_weighting = None
+    return args
+
+
+def set_er_full_replay_args(args):
+    args.replay = "all"
+    args.replay_contexts = None
+    args.sample_selection = "random"
+    args.use_replay = "normal"
+    args.weight_penalty = False
+    args.precondition = False
+    args.importance_weighting = None
+    return args
+
+
+def set_er_reference_replay_args(args):
+    args.replay = "all"
+    args.replay_contexts = sorted(set(args.drift_ref_contexts))
     args.sample_selection = "random"
     args.use_replay = "normal"
     args.weight_penalty = False
@@ -335,11 +394,31 @@ if __name__ == "__main__":
     strategies = {
         "Naive FT (Adam)": [set_naive_finetune_adam_args],
         "Naive FT (SGD)": [set_naive_finetune_sgd_args],
-        "ER": [set_er_args],
-        "ER+Turnover": [set_er_args, set_turnover_args],
+        "ER (Buffer)": [set_er_buffer_args],
+        "ER (Buffer)+Turnover": [set_er_buffer_args, set_turnover_args],
+        "ER (Full Replay)": [set_er_full_replay_args],
+        "ER (Reference Replay)": [set_er_reference_replay_args],
         "SI": [set_si_args],
         "SI+Turnover": [set_si_args, set_turnover_args],
     }
+    if args.strategy_filter is not None:
+        requested = []
+        for token in args.strategy_filter:
+            parts = [part.strip() for part in token.split(",") if part.strip()]
+            requested.extend(parts)
+        unknown = sorted(set(requested) - set(strategies.keys()))
+        if len(unknown) > 0:
+            raise ValueError(
+                "Unknown entries in '--strategy-filter': {}. Available: {}".format(
+                    ", ".join(unknown), ", ".join(strategies.keys())
+                )
+            )
+        selected = [name for name in strategies if name in requested]
+        if len(selected) == 0:
+            raise ValueError(
+                "'--strategy-filter' provided but no valid strategies selected."
+            )
+        strategies = {name: strategies[name] for name in selected}
 
     seed_list = list(range(args.seed, args.seed + args.n_seeds))
     base_metrics = {
@@ -599,6 +678,50 @@ if __name__ == "__main__":
                     strategy_name
                 ][metric_name]["mean"][-1]
             print(" - {:32s} {:.4f}".format(metric_name, final_value))
+    summary_rows = []
+    for strategy_name in strategy_names:
+        stage1_single_task_acc = summary_base[strategy_name]["current_task_acc"]["mean"][-1]
+        final_avg_acc = summary_base[strategy_name]["average_acc_so_far"]["mean"][-1]
+        ref_context = args.drift_ref_contexts[0]
+        final_ref_task_acc = summary_task_n_by_ref[ref_context][strategy_name]["mean"][-1]
+        final_param_drift = summary_drift_by_ref[ref_context][strategy_name][
+            "param_cos_similarity"
+        ]["mean"][-1]
+        final_repr_drift = summary_drift_by_ref[ref_context][strategy_name][
+            "representational_cos_similarity"
+        ]["mean"][-1]
+        summary_rows.append(
+            {
+                "strategy_name": strategy_name,
+                "seed": args.seed,
+                "n_seeds": args.n_seeds,
+                "contexts": args.contexts,
+                "optimizer": args.optimizer,
+                "lr": args.lr,
+                "batch": args.batch,
+                "iters": args.iters,
+                "momentum": args.momentum if hasattr(args, "momentum") else None,
+                "weight_decay": args.weight_decay if hasattr(args, "weight_decay") else 0.0,
+                "adam_beta1": args.adam_beta1 if hasattr(args, "adam_beta1") else 0.9,
+                "adam_beta2": args.adam_beta2 if hasattr(args, "adam_beta2") else 0.999,
+                "adam_eps": args.adam_eps if hasattr(args, "adam_eps") else 1e-8,
+                "drift_ref_context": ref_context,
+                "stage1_single_task_acc": stage1_single_task_acc,
+                "final_avg_acc": final_avg_acc,
+                "final_ref_task_acc": final_ref_task_acc,
+                "final_param_drift": final_param_drift,
+                "final_repr_drift": final_repr_drift,
+                "summary_pdf": pdf_name,
+            }
+        )
+    summary_json = "{}/drift_run_summary.json".format(args.r_dir)
+    with open(summary_json, "w") as f:
+        json.dump({"rows": summary_rows}, f, indent=2)
+    summary_jsonl = "{}/drift_run_summary.jsonl".format(args.r_dir)
+    with open(summary_jsonl, "w") as f:
+        for row in summary_rows:
+            f.write(json.dumps(row) + "\n")
+    print("Wrote run summary: {}".format(summary_json))
     print("\nGenerated plot: {}\n".format(pdf_name))
     plt.close("all")
     print("Total script time: {:.1f}s".format(time.time() - script_start))
