@@ -1,6 +1,5 @@
 import numpy as np
 import torch
-import torch.nn.functional as F
 from visual import visual_plt
 from visual import visual_visdom
 from utils import get_data_loader,checkattr
@@ -193,6 +192,11 @@ def initiate_plotting_dict(n_contexts):
     plotting_dict["drift"] = {
         "param_cos_similarity": [],
         "representational_cos_similarity": [],
+        "param_cka_similarity": [],
+        "representational_cka_similarity": [],
+        "param_procrustes_distance": [],
+        "representational_procrustes_distance": [],
+        "representational_cv_rsa_similarity": [],
         "x_iteration": [],
         "x_context": [],
         "snapshots": {},
@@ -220,7 +224,7 @@ def _get_parameter_vector(model):
     return torch.cat(parameter_list, dim=0)
 
 
-def _compute_representation_vector(model, dataset, context_id, max_samples=256, batch_size=128):
+def _compute_representation_matrix(model, dataset, context_id, max_samples=256, batch_size=128):
     eval_model = _extract_model_for_context(model, context_id)
     device = eval_model.device if hasattr(eval_model, 'device') else eval_model._device()
     cuda = eval_model.cuda if hasattr(eval_model, 'cuda') else eval_model._is_on_cuda()
@@ -232,9 +236,10 @@ def _compute_representation_vector(model, dataset, context_id, max_samples=256, 
         eval_model.apply_XdGmask(context=context_id + 1)
 
     feature_batches = []
+    label_batches = []
     n_collected = 0
     data_loader = get_data_loader(dataset, batch_size=batch_size, cuda=cuda)
-    for x, _ in data_loader:
+    for x, y in data_loader:
         if n_collected >= max_samples:
             break
         x = x.to(device)
@@ -246,26 +251,184 @@ def _compute_representation_vector(model, dataset, context_id, max_samples=256, 
                 features = eval_model.feature_extractor(x)
         features = features.view(features.shape[0], -1).float().cpu()
         feature_batches.append(features)
+        label_batches.append(y.detach().long().cpu())
         n_collected += features.shape[0]
 
     eval_model.train(mode=mode)
 
     if len(feature_batches) == 0:
-        return None
+        return None, None
     all_features = torch.cat(feature_batches, dim=0)[:max_samples]
-    return all_features.mean(dim=0)
+    all_labels = torch.cat(label_batches, dim=0)[:max_samples]
+    return all_features, all_labels
+
+
+def _compute_representation_vector(model, dataset, context_id, max_samples=256, batch_size=128):
+    feature_matrix, _ = _compute_representation_matrix(
+        model, dataset, context_id=context_id, max_samples=max_samples, batch_size=batch_size
+    )
+    if feature_matrix is None:
+        return None
+    return feature_matrix.mean(dim=0)
+
+
+def _center_features(x):
+    return x - x.mean(axis=0, keepdims=True)
+
+
+def _linear_cka(x, y, eps=1e-12):
+    if x is None or y is None:
+        return float("nan")
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    n = min(x.shape[0], y.shape[0])
+    if n < 2:
+        return float("nan")
+    x = _center_features(x[:n])
+    y = _center_features(y[:n])
+    hsic_xy = np.linalg.norm(np.matmul(x.T, y), ord="fro") ** 2
+    hsic_xx = np.linalg.norm(np.matmul(x.T, x), ord="fro") ** 2
+    hsic_yy = np.linalg.norm(np.matmul(y.T, y), ord="fro") ** 2
+    denom = np.sqrt(max(hsic_xx * hsic_yy, eps))
+    return float(hsic_xy / denom) if denom > 0 else float("nan")
+
+
+def _orthogonal_procrustes_distance(x, y, eps=1e-12):
+    if x is None or y is None:
+        return float("nan")
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    n = min(x.shape[0], y.shape[0])
+    if n < 2:
+        return float("nan")
+    x = _center_features(x[:n])
+    y = _center_features(y[:n])
+    x_norm = np.linalg.norm(x, ord="fro")
+    y_norm = np.linalg.norm(y, ord="fro")
+    if x_norm <= eps or y_norm <= eps:
+        return float("nan")
+    x = x / x_norm
+    y = y / y_norm
+    cross_cov = np.matmul(x.T, y)
+    u, _, vt = np.linalg.svd(cross_cov, full_matrices=False)
+    rotation = np.matmul(u, vt)
+    residual = np.linalg.norm(np.matmul(x, rotation) - y, ord="fro")
+    return float(residual / np.sqrt(max(n, 1)))
+
+
+def _vector_to_matrix(vector, chunk_size=512):
+    x = np.asarray(vector, dtype=np.float64).reshape(-1)
+    if x.size == 0:
+        return None
+    n_chunks = int(np.ceil(float(x.size) / float(chunk_size)))
+    padded_size = n_chunks * chunk_size
+    if padded_size > x.size:
+        x = np.pad(x, (0, padded_size - x.size), mode="constant")
+    return x.reshape(n_chunks, chunk_size)
+
+
+def _pearson_corr(x, y, eps=1e-12):
+    x = np.asarray(x, dtype=np.float64).reshape(-1)
+    y = np.asarray(y, dtype=np.float64).reshape(-1)
+    if x.size != y.size or x.size < 2:
+        return float("nan")
+    x = x - x.mean()
+    y = y - y.mean()
+    denom = np.linalg.norm(x) * np.linalg.norm(y)
+    if denom <= eps:
+        return float("nan")
+    return float(np.dot(x, y) / denom)
+
+
+def _cosine_similarity(x, y, eps=1e-12):
+    x = np.asarray(x, dtype=np.float64).reshape(-1)
+    y = np.asarray(y, dtype=np.float64).reshape(-1)
+    if x.size != y.size or x.size == 0:
+        return float("nan")
+    denom = np.linalg.norm(x) * np.linalg.norm(y)
+    if denom <= eps:
+        return float("nan")
+    return float(np.dot(x, y) / denom)
+
+
+def _cross_validated_rdm(features, labels, rng_seed=0):
+    features = np.asarray(features, dtype=np.float64)
+    labels = np.asarray(labels)
+    if features.ndim != 2 or labels.ndim != 1 or features.shape[0] != labels.shape[0]:
+        return None, None
+    unique_labels = np.unique(labels)
+    rng = np.random.RandomState(rng_seed)
+    split_a = {}
+    split_b = {}
+    valid_labels = []
+    for label in unique_labels:
+        idx = np.where(labels == label)[0]
+        if idx.size < 2:
+            continue
+        idx = idx.copy()
+        rng.shuffle(idx)
+        split_point = idx.size // 2
+        a_idx = idx[:split_point]
+        b_idx = idx[split_point:]
+        if a_idx.size == 0 or b_idx.size == 0:
+            continue
+        split_a[int(label)] = features[a_idx].mean(axis=0)
+        split_b[int(label)] = features[b_idx].mean(axis=0)
+        valid_labels.append(int(label))
+    if len(valid_labels) < 2:
+        return None, None
+    valid_labels = sorted(valid_labels)
+    n_labels = len(valid_labels)
+    rdm = np.zeros((n_labels, n_labels), dtype=np.float64)
+    for i in range(n_labels):
+        for j in range(i + 1, n_labels):
+            li = valid_labels[i]
+            lj = valid_labels[j]
+            diff_a = split_a[li] - split_a[lj]
+            diff_b = split_b[li] - split_b[lj]
+            dist = float(np.dot(diff_a, diff_b))
+            rdm[i, j] = dist
+            rdm[j, i] = dist
+    return rdm, valid_labels
+
+
+def _cv_rsa_similarity(ref_features, ref_labels, cur_features, cur_labels):
+    ref_rdm, ref_valid_labels = _cross_validated_rdm(ref_features, ref_labels, rng_seed=0)
+    cur_rdm, cur_valid_labels = _cross_validated_rdm(cur_features, cur_labels, rng_seed=1)
+    if ref_rdm is None or cur_rdm is None:
+        return float("nan")
+    common_labels = sorted(set(ref_valid_labels).intersection(set(cur_valid_labels)))
+    if len(common_labels) < 2:
+        return float("nan")
+    ref_map = {label: idx for idx, label in enumerate(ref_valid_labels)}
+    cur_map = {label: idx for idx, label in enumerate(cur_valid_labels)}
+    ref_sub = np.array(
+        [[ref_rdm[ref_map[i], ref_map[j]] for j in common_labels] for i in common_labels],
+        dtype=np.float64,
+    )
+    cur_sub = np.array(
+        [[cur_rdm[cur_map[i], cur_map[j]] for j in common_labels] for i in common_labels],
+        dtype=np.float64,
+    )
+    triu_idx = np.triu_indices(len(common_labels), k=1)
+    return _pearson_corr(ref_sub[triu_idx], cur_sub[triu_idx])
 
 
 def get_drift_reference_state(model, test_datasets, reference_context, repr_samples=256):
     reference_state = {
         "reference_context": reference_context,
-        "param_vector": _get_parameter_vector(model),
+        "param_vector": _get_parameter_vector(model).numpy(),
         "repr_vectors": {},
+        "repr_matrices": {},
+        "repr_labels": {},
     }
     for context_id, dataset in enumerate(test_datasets):
-        reference_state["repr_vectors"][context_id] = _compute_representation_vector(
+        matrix, labels = _compute_representation_matrix(
             model, dataset, context_id=context_id, max_samples=repr_samples
         )
+        reference_state["repr_matrices"][context_id] = None if matrix is None else matrix.numpy()
+        reference_state["repr_labels"][context_id] = None if labels is None else labels.numpy()
+        reference_state["repr_vectors"][context_id] = None if matrix is None else matrix.mean(dim=0).numpy()
     return reference_state
 
 
@@ -273,44 +436,104 @@ def get_drift_state_serializable(model, test_datasets, repr_samples=256):
     state = {
         "param_vector": _get_parameter_vector(model).numpy().tolist(),
         "repr_vectors": [],
+        "repr_matrices": [],
+        "repr_labels": [],
     }
     for context_id, dataset in enumerate(test_datasets):
-        vector = _compute_representation_vector(model, dataset, context_id=context_id, max_samples=repr_samples)
-        state["repr_vectors"].append(None if vector is None else vector.numpy().tolist())
+        matrix, labels = _compute_representation_matrix(
+            model, dataset, context_id=context_id, max_samples=repr_samples
+        )
+        if matrix is None:
+            state["repr_vectors"].append(None)
+            state["repr_matrices"].append(None)
+            state["repr_labels"].append(None)
+        else:
+            state["repr_vectors"].append(matrix.mean(dim=0).numpy().tolist())
+            state["repr_matrices"].append(matrix.numpy().tolist())
+            state["repr_labels"].append(labels.numpy().tolist())
     return state
 
 
 def compute_drift_metrics(model, test_datasets, reference_state, current_context, repr_samples=256):
-    current_param_vector = _get_parameter_vector(model)
-    param_cos_similarity = F.cosine_similarity(
-        current_param_vector.unsqueeze(0), reference_state["param_vector"].unsqueeze(0)
-    ).item()
+    current_param_vector = _get_parameter_vector(model).numpy()
+    ref_param_vector = np.asarray(reference_state["param_vector"], dtype=np.float64)
+    param_cos_similarity = _cosine_similarity(current_param_vector, ref_param_vector)
+    param_matrix = _vector_to_matrix(current_param_vector)
+    ref_param_matrix = _vector_to_matrix(ref_param_vector)
+    param_cka_similarity = _linear_cka(param_matrix, ref_param_matrix)
+    param_procrustes_distance = _orthogonal_procrustes_distance(param_matrix, ref_param_matrix)
 
     max_context = len(test_datasets) if current_context is None else current_context
     repr_cosines = []
+    repr_cka_scores = []
+    repr_procrustes_scores = []
+    repr_cv_rsa_scores = []
     for context_id in range(max_context):
-        ref_vector = reference_state["repr_vectors"].get(context_id)
-        if ref_vector is None:
+        ref_matrix = reference_state["repr_matrices"].get(context_id)
+        ref_labels = reference_state["repr_labels"].get(context_id)
+        if ref_matrix is None:
             continue
-        cur_vector = _compute_representation_vector(
+        cur_matrix, cur_labels = _compute_representation_matrix(
             model, test_datasets[context_id], context_id=context_id, max_samples=repr_samples
         )
-        if cur_vector is None:
+        if cur_matrix is None:
             continue
-        repr_cosines.append(F.cosine_similarity(cur_vector.unsqueeze(0), ref_vector.unsqueeze(0)).item())
+        ref_matrix_np = np.asarray(ref_matrix, dtype=np.float64)
+        cur_matrix_np = cur_matrix.numpy()
+        n_common = min(ref_matrix_np.shape[0], cur_matrix_np.shape[0])
+        if n_common < 2:
+            continue
+        ref_mean = ref_matrix_np[:n_common].mean(axis=0)
+        cur_mean = cur_matrix_np[:n_common].mean(axis=0)
+        repr_cosines.append(_cosine_similarity(cur_mean, ref_mean))
+        repr_cka_scores.append(_linear_cka(cur_matrix_np[:n_common], ref_matrix_np[:n_common]))
+        repr_procrustes_scores.append(
+            _orthogonal_procrustes_distance(cur_matrix_np[:n_common], ref_matrix_np[:n_common])
+        )
+        if ref_labels is not None and cur_labels is not None:
+            repr_cv_rsa_scores.append(
+                _cv_rsa_similarity(
+                    ref_matrix_np[:n_common],
+                    np.asarray(ref_labels)[:n_common],
+                    cur_matrix_np[:n_common],
+                    cur_labels.numpy()[:n_common],
+                )
+            )
 
-    representational_cos_similarity = float(np.mean(repr_cosines)) if len(repr_cosines) > 0 else 0.0
+    representational_cos_similarity = float(np.nanmean(repr_cosines)) if len(repr_cosines) > 0 else float("nan")
+    representational_cka_similarity = float(np.nanmean(repr_cka_scores)) if len(repr_cka_scores) > 0 else float("nan")
+    representational_procrustes_distance = (
+        float(np.nanmean(repr_procrustes_scores)) if len(repr_procrustes_scores) > 0 else float("nan")
+    )
+    representational_cv_rsa_similarity = (
+        float(np.nanmean(repr_cv_rsa_scores)) if len(repr_cv_rsa_scores) > 0 else float("nan")
+    )
     return {
         "param_cos_similarity": param_cos_similarity,
         "representational_cos_similarity": representational_cos_similarity,
+        "param_cka_similarity": param_cka_similarity,
+        "representational_cka_similarity": representational_cka_similarity,
+        "param_procrustes_distance": param_procrustes_distance,
+        "representational_procrustes_distance": representational_procrustes_distance,
+        "representational_cv_rsa_similarity": representational_cv_rsa_similarity,
     }
 
 
 def append_drift_to_plotting_dict(plotting_dict, drift_metrics, iteration, current_context):
     if (plotting_dict is None) or ("drift" not in plotting_dict):
         return
-    plotting_dict["drift"]["param_cos_similarity"].append(drift_metrics["param_cos_similarity"])
-    plotting_dict["drift"]["representational_cos_similarity"].append(drift_metrics["representational_cos_similarity"])
+    for key in [
+        "param_cos_similarity",
+        "representational_cos_similarity",
+        "param_cka_similarity",
+        "representational_cka_similarity",
+        "param_procrustes_distance",
+        "representational_procrustes_distance",
+        "representational_cv_rsa_similarity",
+    ]:
+        if key not in plotting_dict["drift"]:
+            plotting_dict["drift"][key] = []
+        plotting_dict["drift"][key].append(drift_metrics.get(key, float("nan")))
     plotting_dict["drift"]["x_iteration"].append(iteration)
     plotting_dict["drift"]["x_context"].append(current_context)
 

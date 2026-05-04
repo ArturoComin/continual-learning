@@ -90,6 +90,26 @@ def _eval_cb(log, test_datasets, visdom=None, plotting_dict=None, iters_per_cont
                             title="drift ({})".format(visdom["graph"]), iteration=iteration, env=visdom["env"],
                             ylabel="cosine similarity"
                         )
+                        visual_visdom.visualize_scalars(
+                            [
+                                drift_metrics.get("param_cka_similarity", np.nan),
+                                drift_metrics.get("representational_cka_similarity", np.nan),
+                                drift_metrics.get("param_procrustes_distance", np.nan),
+                                drift_metrics.get("representational_procrustes_distance", np.nan),
+                                drift_metrics.get("representational_cv_rsa_similarity", np.nan),
+                            ],
+                            names=[
+                                "param_cka_similarity",
+                                "representational_cka_similarity",
+                                "param_procrustes_distance",
+                                "representational_procrustes_distance",
+                                "representational_cv_rsa_similarity",
+                            ],
+                            title="drift-extended ({})".format(visdom["graph"]),
+                            iteration=iteration,
+                            env=visdom["env"],
+                            ylabel="similarity / distance",
+                        )
 
     ## Return the callback-function (except if visdom is not selected!)
     return eval_cb if (visdom is not None) or (plotting_dict is not None) else None

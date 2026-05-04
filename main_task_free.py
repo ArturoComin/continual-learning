@@ -451,11 +451,27 @@ def run(args, verbose=False):
         )
         figure_list.append(figure)
         if checkattr(args, 'drift_metrics') and len(plotting_dict["drift"]["x_context"]) > 0:
+            drift_lines = [
+                plotting_dict["drift"].get("param_cos_similarity", []),
+                plotting_dict["drift"].get("representational_cos_similarity", []),
+                plotting_dict["drift"].get("param_cka_similarity", []),
+                plotting_dict["drift"].get("representational_cka_similarity", []),
+                plotting_dict["drift"].get("param_procrustes_distance", []),
+                plotting_dict["drift"].get("representational_procrustes_distance", []),
+                plotting_dict["drift"].get("representational_cv_rsa_similarity", []),
+            ]
             figure = visual_plt.plot_lines(
-                [plotting_dict["drift"]["param_cos_similarity"],
-                 plotting_dict["drift"]["representational_cos_similarity"]],
+                drift_lines,
                 x_axes=plotting_dict["drift"]["x_context"],
-                line_names=['param_cos_similarity', 'representational_cos_similarity']
+                line_names=[
+                    'param_cos_similarity',
+                    'representational_cos_similarity',
+                    'param_cka_similarity',
+                    'representational_cka_similarity',
+                    'param_procrustes_distance',
+                    'representational_procrustes_distance',
+                    'representational_cv_rsa_similarity',
+                ]
             )
             figure_list.append(figure)
         for figure in figure_list:
