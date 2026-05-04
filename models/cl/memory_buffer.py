@@ -61,7 +61,8 @@ class MemoryBuffer(nn.Module, metaclass=abc.ABCMeta):
         memory_set = []
 
         if self.sample_selection=="fromp":
-            first_entry = True
+            memorable_points_batches = []
+            scores_batches = []
 
             # Loop over all samples in the dataset
             dataloader = get_data_loader(dataset, 128, cuda=self._is_on_cuda())
@@ -73,13 +74,11 @@ class MemoryBuffer(nn.Module, metaclass=abc.ABCMeta):
                 lamb = torch.sum(lamb.cpu(), dim=-1).detach()
 
                 # Store both the samples and their computed scores
-                if first_entry:
-                    memorable_points = data
-                    scores = lamb
-                    first_entry = False
-                else:
-                    memorable_points = torch.cat([memorable_points, data], dim=0)
-                    scores = torch.cat([scores, lamb], dim=0)
+                memorable_points_batches.append(data)
+                scores_batches.append(lamb)
+
+            memorable_points = torch.cat(memorable_points_batches, dim=0)
+            scores = torch.cat(scores_batches, dim=0)
 
             # Select the samples with the best (or worst) scores, and store them in the memory buffer
             if len(memorable_points) > n:
@@ -90,17 +89,14 @@ class MemoryBuffer(nn.Module, metaclass=abc.ABCMeta):
 
         elif self.sample_selection=="herding":
             # Compute features for each example in [dataset]
-            first_entry = True
+            feature_batches = []
             dataloader = get_data_loader(dataset, 128, cuda=self._is_on_cuda())
             for (image_batch, _) in dataloader:
                 image_batch = image_batch.to(self._device())
                 with torch.no_grad():
                     feature_batch = self.feature_extractor(image_batch).cpu()
-                if first_entry:
-                    features = feature_batch
-                    first_entry = False
-                else:
-                    features = torch.cat([features, feature_batch], dim=0)
+                feature_batches.append(feature_batch)
+            features = torch.cat(feature_batches, dim=0)
             if self.norm_exemplars:
                 features = F.normalize(features, p=2, dim=1)
 

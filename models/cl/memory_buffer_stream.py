@@ -50,11 +50,14 @@ class MemoryBuffer(nn.Module, metaclass=abc.ABCMeta):
 
     def initialize_buffer(self, config, return_c=False):
         '''Initalize the memory buffer with tensors of correct shape filled with zeros.'''
-        self.buffer_x = torch.zeros(self.budget, config['channels'], config['size'], config['size'],
-                                    dtype=torch.float32, device=self._device())
-        self.buffer_y = torch.zeros(self.budget, dtype=torch.int64, device=self._device())
+        # "empty" avoids an unnecessary full memset because only the filled prefix is ever sampled.
+        self.buffer_x = torch.empty(
+            self.budget, config['channels'], config['size'], config['size'],
+            dtype=torch.float32, device=self._device()
+        )
+        self.buffer_y = torch.empty(self.budget, dtype=torch.int64, device=self._device())
         if return_c:
-            self.buffer_c = torch.zeros(self.budget, dtype=torch.int64, device=self._device())
+            self.buffer_c = torch.empty(self.budget, dtype=torch.int64, device=self._device())
         pass
 
     def add_new_samples(self, x, y, c):
@@ -62,6 +65,14 @@ class MemoryBuffer(nn.Module, metaclass=abc.ABCMeta):
 
         # Whenever new training data is observed, indicate that class-means of stored data should be recomputed
         self.compute_means = True
+
+        device = self._device()
+        if x.device != device:
+            x = x.to(device)
+        if y.device != device:
+            y = y.to(device)
+        if c is not None and c.device != device:
+            c = c.to(device)
 
         # Loop through all the samples contained in [x]
         for index in range(x.shape[0]):
@@ -71,10 +82,10 @@ class MemoryBuffer(nn.Module, metaclass=abc.ABCMeta):
             self.samples_so_far += 1
             # -if selected, add the sample to the memory buffer
             if reservoir_index >= 0:
-                self.buffer_x[reservoir_index] = x[index].to(self._device())
-                self.buffer_y[reservoir_index] = y[index].to(self._device())
+                self.buffer_x[reservoir_index] = x[index]
+                self.buffer_y[reservoir_index] = y[index]
                 if hasattr(self, 'buffer_c'):
-                    self.buffer_c[reservoir_index] = c[index].to(self._device())
+                    self.buffer_c[reservoir_index] = c[index]
 
     def sample_from_buffer(self, size):
         '''Randomly sample [size] samples from the memory buffer.'''
@@ -85,7 +96,7 @@ class MemoryBuffer(nn.Module, metaclass=abc.ABCMeta):
             size = samples_in_buffer
 
         # Randomly select samples from the buffer and return them
-        selected_indeces = np.random.choice(samples_in_buffer, size=size, replace=False)
+        selected_indeces = torch.randperm(samples_in_buffer, device=self.buffer_x.device)[:size]
         x = self.buffer_x[selected_indeces]
         y = self.buffer_y[selected_indeces]
         c = self.buffer_c[selected_indeces] if hasattr(self, 'buffer_c') else None
