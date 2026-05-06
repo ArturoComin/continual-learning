@@ -72,6 +72,10 @@ FC_DROP="${FC_DROP:-0.0}"
 OPTIMIZER="${OPTIMIZER:-adam}"
 LR="${LR:-0.0001}"
 BATCH="${BATCH:-128}"
+RESULTS_DIR="${RESULTS_DIR:-./store/results}"
+PLOT_DIR="${PLOT_DIR:-./store/plots}"
+MODEL_DIR="${MODEL_DIR:-./store/models}"
+CLEAN_OUTPUT_DIRS="${CLEAN_OUTPUT_DIRS:-0}"    # 1 => wipe RESULTS_DIR/PLOT_DIR/MODEL_DIR before run
 
 # Drift-specific controls.
 DRIFT_REF_CONTEXTS="${DRIFT_REF_CONTEXTS:-1}"   # space-separated, e.g. "1 2 5"
@@ -87,12 +91,19 @@ FULL_REPLAY_REFERENCE_TASKS="${FULL_REPLAY_REFERENCE_TASKS:-0}"  # 1 => ER repla
 RUN_NAIVE_ADAM="${RUN_NAIVE_ADAM:-1}"
 RUN_NAIVE_SGD="${RUN_NAIVE_SGD:-1}"
 RUN_ER="${RUN_ER:-1}"
-RUN_ER_TURNOVER="${RUN_ER_TURNOVER:-1}"
-RUN_ER_BUFFER="${RUN_ER_BUFFER:-0}"
-RUN_ER_BUFFER_TURNOVER="${RUN_ER_BUFFER_TURNOVER:-0}"
+RUN_ER_TURNOVER="${RUN_ER_TURNOVER:-0}"
 RUN_ER_FULL_REPLAY="${RUN_ER_FULL_REPLAY:-0}"
+RUN_ER_REFERENCE_REPLAY="${RUN_ER_REFERENCE_REPLAY:-0}"
 RUN_SI="${RUN_SI:-1}"
-RUN_SI_TURNOVER="${RUN_SI_TURNOVER:-1}"
+RUN_SI_TURNOVER="${RUN_SI_TURNOVER:-0}"
+
+# Parallelization controls.
+# RUN_MODE=array => one job per (seed, strategy) pair via Slurm arrays.
+# In array mode, submit with:
+#   sbatch --array=0-$((N_SEEDS*NUM_STRATEGIES-1)) --export=ALL,... habrok/run_drift_experiment.sbatch
+RUN_MODE="${RUN_MODE:-single}"           # single|array
+SEED_INDEX="${SEED_INDEX:-}"             # optional direct override in array mode
+STRATEGY_INDEX="${STRATEGY_INDEX:-}"     # optional direct override in array mode
 
 # Catch-all passthrough for any additional drift_experiment.py CLI args.
 EXTRA_ARGS="${EXTRA_ARGS:-}"
@@ -100,17 +111,41 @@ EXTRA_ARGS="${EXTRA_ARGS:-}"
 strategy_filter=()
 [ "${RUN_NAIVE_ADAM}" = "1" ] && strategy_filter+=("Naive FT (Adam)")
 [ "${RUN_NAIVE_SGD}" = "1" ] && strategy_filter+=("Naive FT (SGD)")
-[ "${RUN_ER}" = "1" ] && strategy_filter+=("ER")
-[ "${RUN_ER_TURNOVER}" = "1" ] && strategy_filter+=("ER+Turnover")
-[ "${RUN_ER_BUFFER}" = "1" ] && strategy_filter+=("ER (Buffer)")
-[ "${RUN_ER_BUFFER_TURNOVER}" = "1" ] && strategy_filter+=("ER (Buffer)+Turnover")
+[ "${RUN_ER}" = "1" ] && strategy_filter+=("ER (Buffer)")
+[ "${RUN_ER_TURNOVER}" = "1" ] && strategy_filter+=("ER (Buffer)+Turnover")
 [ "${RUN_ER_FULL_REPLAY}" = "1" ] && strategy_filter+=("ER (Full Replay)")
+[ "${RUN_ER_REFERENCE_REPLAY}" = "1" ] && strategy_filter+=("ER (Reference Replay)")
 [ "${RUN_SI}" = "1" ] && strategy_filter+=("SI")
 [ "${RUN_SI_TURNOVER}" = "1" ] && strategy_filter+=("SI+Turnover")
 
 if [ "${#strategy_filter[@]}" -eq 0 ]; then
   echo "No strategies selected. Set at least one RUN_* toggle to 1."
   exit 1
+fi
+
+if [ "${RUN_MODE}" = "array" ]; then
+  if [ -n "${SEED_INDEX}" ] && [ -n "${STRATEGY_INDEX}" ]; then
+    array_seed_idx="${SEED_INDEX}"
+    array_strategy_idx="${STRATEGY_INDEX}"
+  else
+    if [ -z "${SLURM_ARRAY_TASK_ID:-}" ]; then
+      echo "RUN_MODE=array requires SLURM_ARRAY_TASK_ID (submit with --array) or explicit SEED_INDEX/STRATEGY_INDEX."
+      exit 1
+    fi
+    array_strategy_idx=$((SLURM_ARRAY_TASK_ID % ${#strategy_filter[@]}))
+    array_seed_idx=$((SLURM_ARRAY_TASK_ID / ${#strategy_filter[@]}))
+  fi
+  if [ "${array_seed_idx}" -lt 0 ] || [ "${array_seed_idx}" -ge "${N_SEEDS}" ]; then
+    echo "Computed seed index ${array_seed_idx} is out of range for N_SEEDS=${N_SEEDS}"
+    exit 1
+  fi
+  if [ "${array_strategy_idx}" -lt 0 ] || [ "${array_strategy_idx}" -ge "${#strategy_filter[@]}" ]; then
+    echo "Computed strategy index ${array_strategy_idx} is out of range for selected strategies (${#strategy_filter[@]})."
+    exit 1
+  fi
+  SEED=$((SEED + array_seed_idx))
+  N_SEEDS=1
+  strategy_filter=("${strategy_filter[$array_strategy_idx]}")
 fi
 
 cmd=(
@@ -121,6 +156,9 @@ cmd=(
   --optimizer "${OPTIMIZER}"
   --lr "${LR}"
   --batch "${BATCH}"
+  --results-dir "${RESULTS_DIR}"
+  --plot-dir "${PLOT_DIR}"
+  --model-dir "${MODEL_DIR}"
   --fc-layers "${FC_LAYERS}"
   --fc-units "${FC_UNITS}"
   --fc-drop "${FC_DROP}"
@@ -151,10 +189,32 @@ if [ -n "${EXTRA_ARGS}" ]; then
   cmd+=("${extra_arr[@]}")
 fi
 
+if [ "${CLEAN_OUTPUT_DIRS}" = "1" ]; then
+  echo "CLEAN_OUTPUT_DIRS=1 -> removing previous outputs:"
+  echo "  RESULTS_DIR=${RESULTS_DIR}"
+  echo "  PLOT_DIR=${PLOT_DIR}"
+  echo "  MODEL_DIR=${MODEL_DIR}"
+  rm -rf "${RESULTS_DIR}"
+  rm -rf "${PLOT_DIR}"
+  rm -rf "${MODEL_DIR}"
+fi
+mkdir -p "${RESULTS_DIR}"
+mkdir -p "${PLOT_DIR}"
+mkdir -p "${MODEL_DIR}"
+
 echo "============================================================"
 echo "Drift run config:"
 echo "  seed=${SEED} n_seeds=${N_SEEDS} contexts=${CONTEXTS}"
+echo "  run_mode=${RUN_MODE}"
+if [ "${RUN_MODE}" = "array" ]; then
+  echo "  slurm_array_task_id=${SLURM_ARRAY_TASK_ID:-<unset>}"
+  echo "  selected_strategy=${strategy_filter[0]}"
+fi
 echo "  optimizer=${OPTIMIZER} lr=${LR} batch=${BATCH}"
+echo "  results_dir=${RESULTS_DIR}"
+echo "  plot_dir=${PLOT_DIR}"
+echo "  model_dir=${MODEL_DIR}"
+echo "  clean_output_dirs=${CLEAN_OUTPUT_DIRS}"
 echo "  fc_layers=${FC_LAYERS} fc_units=${FC_UNITS} fc_drop=${FC_DROP}"
 echo "  drift_ref_context=${DRIFT_REF_CONTEXT}"
 echo "  drift_ref_contexts=${DRIFT_REF_CONTEXTS}"

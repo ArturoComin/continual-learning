@@ -18,6 +18,11 @@ from params.param_values import set_default_values, check_for_errors
 from visual import visual_plt
 
 
+def _log_progress(message):
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    print("[{}] {}".format(stamp, message), flush=True)
+
+
 def handle_inputs():
     kwargs = {"comparison": True}
     parser = options.define_args(
@@ -82,6 +87,12 @@ def handle_inputs():
             '(e.g. --strategy-filter "ER (Buffer),SI+Turnover")'
         ),
     )
+    parser.add_argument(
+        "--lop-metric-samples",
+        type=int,
+        default=256,
+        help="max samples used for dead-unit/effective-rank metrics per context",
+    )
     args = parser.parse_args()
 
     # Fixed experiment setup for this script.
@@ -108,6 +119,7 @@ def handle_inputs():
                 )
     args.results_dict = True
     args.pdf = False
+    args.lop_metrics = True
 
     set_default_values(args, also_hyper_params=True)
     check_for_errors(args, **kwargs)
@@ -164,25 +176,51 @@ def _has_valid_plotting_data(plotting_dict, expected_contexts):
     return True
 
 
+def _has_valid_lop_data(plotting_dict, expected_contexts):
+    if not isinstance(plotting_dict, dict):
+        return False
+    lop_dict = plotting_dict.get("lop")
+    if not isinstance(lop_dict, dict):
+        return False
+    x_context = lop_dict.get("x_context", [])
+    if len(x_context) == 0:
+        return False
+    for field in ("dead_unit_fraction", "effective_rank", "weight_magnitude"):
+        values = lop_dict.get(field, [])
+        if len(values) != len(x_context):
+            return False
+    if expected_contexts is not None and len(set(x_context)) < expected_contexts:
+        return False
+    return True
+
+
 def run_and_collect(args):
     start_time = time.time()
     dict_prefix, param_stamp = _dict_file_prefix(args)
     acc_file = _acc_file(args, param_stamp)
     model_file = "{}/mM-{}".format(args.m_dir, param_stamp)
+    _log_progress("run start: {}".format(param_stamp))
 
     if os.path.isfile(dict_prefix + ".pkl"):
-        print(" already run (dict): {}".format(param_stamp))
+        _log_progress("already run (dict): {}".format(param_stamp))
         plotting_dict = utils.load_object(dict_prefix)
-        if not _has_valid_plotting_data(plotting_dict, expected_contexts=args.contexts):
-            print(
-                " cached dict invalid/empty -> rebuilding: {}.pkl".format(dict_prefix)
+        needs_rebuild = not _has_valid_plotting_data(
+            plotting_dict, expected_contexts=args.contexts
+        )
+        if checkattr(args, "lop_metrics"):
+            needs_rebuild = needs_rebuild or not _has_valid_lop_data(
+                plotting_dict, expected_contexts=args.contexts
+            )
+        if needs_rebuild:
+            _log_progress(
+                "cached dict invalid/empty -> rebuilding: {}.pkl".format(dict_prefix)
             )
             os.remove(dict_prefix + ".pkl")
             args.train = True
             main.run(args)
     elif os.path.isfile(acc_file) or os.path.isfile(model_file):
         source = "acc" if os.path.isfile(acc_file) else "checkpoint"
-        print(
+        _log_progress(
             " found {} but missing dict -> rerunning training: {}".format(
                 source, param_stamp
             )
@@ -190,13 +228,13 @@ def run_and_collect(args):
         args.train = True
         main.run(args)
     else:
-        print(" ...running: {}".format(param_stamp))
+        _log_progress("running: {}".format(param_stamp))
         args.train = True
         main.run(args)
 
-    print(" loading plotting dict: {}.pkl".format(dict_prefix))
+    _log_progress("loading plotting dict: {}.pkl".format(dict_prefix))
     plotting_dict = utils.load_object(dict_prefix)
-    print(" run_and_collect finished in {:.1f}s".format(time.time() - start_time))
+    _log_progress("run finished in {:.1f}s: {}".format(time.time() - start_time, param_stamp))
     return plotting_dict
 
 
@@ -544,7 +582,6 @@ def set_naive_finetune_sgd_args(args):
     args.optimizer = "sgd"
     if hasattr(args, "naive_ft_lr_sgd") and args.naive_ft_lr_sgd is not None:
         args.lr = args.naive_ft_lr_sgd
-    args.momentum = 0.9
     return args
 
 
@@ -552,10 +589,8 @@ if __name__ == "__main__":
     script_start = time.time()
     args = handle_inputs()
 
-    if not os.path.isdir(args.r_dir):
-        os.mkdir(args.r_dir)
-    if not os.path.isdir(args.p_dir):
-        os.mkdir(args.p_dir)
+    os.makedirs(args.r_dir, exist_ok=True)
+    os.makedirs(args.p_dir, exist_ok=True)
 
     strategies = {
         "Naive FT (Adam)": [set_naive_finetune_adam_args],
@@ -591,6 +626,9 @@ if __name__ == "__main__":
         name: {
             "current_task_acc": [],
             "average_acc_so_far": [],
+            "dead_unit_fraction": [],
+            "effective_rank": [],
+            "weight_magnitude": [],
         }
         for name in strategies
     }
@@ -615,18 +653,18 @@ if __name__ == "__main__":
     }
 
     for name, config_fns in strategies.items():
-        print("\n------{}------".format(name))
+        _log_progress("strategy start: {}".format(name))
         strategy_start = time.time()
         for seed in seed_list:
             seed_start = time.time()
-            print(" [{}] seed {} | preparing run args".format(name, seed))
+            _log_progress("[{}] seed {} | preparing run args".format(name, seed))
             run_args = copy.deepcopy(args)
             for config_fn in config_fns:
                 run_args = config_fn(run_args)
             run_args.seed = seed
-            print(" [{}] seed {} | run_and_collect start".format(name, seed))
+            _log_progress("[{}] seed {} | run_and_collect start".format(name, seed))
             plotting_dict = run_and_collect(run_args)
-            print(" [{}] seed {} | extracting base metrics".format(name, seed))
+            _log_progress("[{}] seed {} | extracting base metrics".format(name, seed))
 
             base_metrics[name]["current_task_acc"].append(
                 extract_current_task_accuracy(
@@ -636,6 +674,31 @@ if __name__ == "__main__":
             base_metrics[name]["average_acc_so_far"].append(
                 extract_average_acc_so_far(plotting_dict, n_contexts=run_args.contexts)
             )
+            lop_x_context = plotting_dict.get("lop", {}).get("x_context", [])
+            dead_units = extract_series_by_context(
+                {"x_context": lop_x_context},
+                plotting_dict.get("lop", {}).get(
+                    "dead_unit_fraction", [np.nan] * len(lop_x_context)
+                ),
+                n_contexts=run_args.contexts,
+            )
+            effective_rank = extract_series_by_context(
+                {"x_context": lop_x_context},
+                plotting_dict.get("lop", {}).get(
+                    "effective_rank", [np.nan] * len(lop_x_context)
+                ),
+                n_contexts=run_args.contexts,
+            )
+            weight_magnitude = extract_series_by_context(
+                {"x_context": lop_x_context},
+                plotting_dict.get("lop", {}).get(
+                    "weight_magnitude", [np.nan] * len(lop_x_context)
+                ),
+                n_contexts=run_args.contexts,
+            )
+            base_metrics[name]["dead_unit_fraction"].append(dead_units)
+            base_metrics[name]["effective_rank"].append(effective_rank)
+            base_metrics[name]["weight_magnitude"].append(weight_magnitude)
             param_cos = extract_series_by_context(
                 {"x_context": plotting_dict["drift"]["x_context"]},
                 plotting_dict["drift"]["param_cos_similarity"],
@@ -680,7 +743,7 @@ if __name__ == "__main__":
                 n_contexts=run_args.contexts,
             )
             for ref_context in args.drift_ref_contexts:
-                print(
+                _log_progress(
                     " [{}] seed {} | ref {} | recomputing task-n acc + drift".format(
                         name, seed, ref_context
                     )
@@ -724,13 +787,13 @@ if __name__ == "__main__":
                     drift_metrics_by_ref[ref_context][name][metric_name].append(
                         drift_sources.get(metric_name, fallback[metric_name])
                     )
-            print(
+            _log_progress(
                 " [{}] seed {} | done in {:.1f}s".format(
                     name, seed, time.time() - seed_start
                 )
             )
-        print(
-            " [{}] strategy done in {:.1f}s".format(name, time.time() - strategy_start)
+        _log_progress(
+            "strategy done: {} | took {:.1f}s".format(name, time.time() - strategy_start)
         )
 
     contexts = list(range(1, args.contexts + 1))
@@ -785,6 +848,9 @@ if __name__ == "__main__":
         ("current_task_acc", "Current-task accuracy", None),
         ("average_acc_so_far", "Average accuracy (all tasks so far)", (0.6, 1)),
         ("task_n_acc", "Accuracy on reference task", (0.6, 1)),
+        ("dead_unit_fraction", "Dead unit fraction", (0, 1)),
+        ("effective_rank", "Effective rank", None),
+        ("weight_magnitude", "Weight magnitude (mean abs)", None),
         ("param_cos_similarity", "Parameter drift (1 - cosine similarity)", (0, 1)),
         (
             "representational_cos_similarity",
@@ -808,6 +874,13 @@ if __name__ == "__main__":
             ax = axes[idx]
             for strategy_idx, strategy_name in enumerate(strategy_names):
                 if metric_name in ("current_task_acc", "average_acc_so_far"):
+                    mean_vals = summary_base[strategy_name][metric_name]["mean"]
+                    ci_vals = summary_base[strategy_name][metric_name]["ci"]
+                elif metric_name in (
+                    "dead_unit_fraction",
+                    "effective_rank",
+                    "weight_magnitude",
+                ):
                     mean_vals = summary_base[strategy_name][metric_name]["mean"]
                     ci_vals = summary_base[strategy_name][metric_name]["ci"]
                 elif metric_name == "task_n_acc":
@@ -884,6 +957,12 @@ if __name__ == "__main__":
         for metric_name, _, _ in metric_specs:
             if metric_name in ("current_task_acc", "average_acc_so_far"):
                 final_value = summary_base[strategy_name][metric_name]["mean"][-1]
+            elif metric_name in (
+                "dead_unit_fraction",
+                "effective_rank",
+                "weight_magnitude",
+            ):
+                final_value = summary_base[strategy_name][metric_name]["mean"][-1]
             elif metric_name == "task_n_acc":
                 final_value = summary_task_n_by_ref[args.drift_ref_contexts[0]][
                     strategy_name
@@ -897,6 +976,13 @@ if __name__ == "__main__":
     for strategy_name in strategy_names:
         stage1_single_task_acc = summary_base[strategy_name]["current_task_acc"]["mean"][-1]
         final_avg_acc = summary_base[strategy_name]["average_acc_so_far"]["mean"][-1]
+        final_dead_unit_fraction = summary_base[strategy_name]["dead_unit_fraction"][
+            "mean"
+        ][-1]
+        final_effective_rank = summary_base[strategy_name]["effective_rank"]["mean"][-1]
+        final_weight_magnitude = summary_base[strategy_name]["weight_magnitude"]["mean"][
+            -1
+        ]
         ref_context = args.drift_ref_contexts[0]
         final_ref_task_acc = summary_task_n_by_ref[ref_context][strategy_name]["mean"][-1]
         final_param_drift = summary_drift_by_ref[ref_context][strategy_name][
@@ -938,6 +1024,9 @@ if __name__ == "__main__":
                 "drift_ref_context": ref_context,
                 "stage1_single_task_acc": stage1_single_task_acc,
                 "final_avg_acc": final_avg_acc,
+                "final_dead_unit_fraction": final_dead_unit_fraction,
+                "final_effective_rank": final_effective_rank,
+                "final_weight_magnitude": final_weight_magnitude,
                 "final_ref_task_acc": final_ref_task_acc,
                 "final_param_drift": final_param_drift,
                 "final_repr_drift": final_repr_drift,

@@ -164,10 +164,10 @@ def train_cl(model, train_datasets, iters=2000, batch_size=32, baseline='none',
                 iters_left = len(data_loader)
             if ReplayStoredData:
                 if per_context:
-                    up_to_context = context if baseline=="cummulative" else context-1
-                    batch_size_replay = int(np.ceil(batch_size/up_to_context)) if (up_to_context>1) else batch_size
+                    replay_slots = len(previous_datasets)
+                    batch_size_replay = int(np.ceil(batch_size/replay_slots)) if (replay_slots>1) else batch_size
                     # -if different active classes per context (e.g., Task-IL), need separate replay for each context
-                    for context_id in range(up_to_context):
+                    for context_id in range(replay_slots):
                         batch_size_to_use = min(batch_size_replay, len(previous_datasets[context_id]))
                         iters_left_previous[context_id] -= 1
                         if iters_left_previous[context_id]==0:
@@ -232,8 +232,8 @@ def train_cl(model, train_datasets, iters=2000, batch_size=32, baseline='none',
                     # Sample replayed training data, move to correct device and store in lists
                     x_ = list()
                     y_ = list()
-                    up_to_context = context if baseline=="cummulative" else context-1
-                    for context_id in range(up_to_context):
+                    replay_slots = len(previous_datasets)
+                    for context_id in range(replay_slots):
                         x_temp, y_temp = next(data_loader_previous[context_id])
                         x_.append(x_temp.to(device, non_blocking=non_blocking))
                         # -only keep [y_] if required (as otherwise unnecessary computations will be done)
@@ -246,7 +246,7 @@ def train_cl(model, train_datasets, iters=2000, batch_size=32, baseline='none',
                     # If required, get target scores (i.e, [scores_])        -- using previous model, with no_grad()
                     if (model.replay_targets=="soft") and (previous_model is not None):
                         scores_ = list()
-                        for context_id in range(up_to_context):
+                        for context_id in range(replay_slots):
                             with torch.no_grad():
                                 scores_temp = previous_model.classify(x_[context_id], no_prototypes=True)
                             if active_classes is not None:

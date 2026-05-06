@@ -4,7 +4,7 @@
 .idea/
 __pycache__/
 
-store/models/mM*
+store/**
 store/plots
 store/datasets
 store/results
